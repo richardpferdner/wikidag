@@ -17,7 +17,7 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
     - exclude files (cl_type = 'file')
     - expand tree through subcategories only, collect articles as terminal nodes
 
-### Phase 2: Redue Page Tree
+### Phase 2: Prune Page Tree to BSTEM
 - tables: page > bstem_page
 - create materialized page table containing all pages from BSTEM category tree
   - deduplicate pages appearing in multiple BSTEM categories
