@@ -41,8 +41,13 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
  
 ### Phase 5: Clean up
 - Remove table elements that are not useful
-  - is-new 
-
+  - page_is_new
+  - page_random
+  - page_touched
+  - page_links_updated
+  - page_latest
+  - page_len
+     
 ## Problem Statement
 - Need efficient access to BSTEM subset of Wikipedia's 63M pages
 - Original categorylinks table (208M rows) and pagelinks table (1.5B rows) too large for targeted analysis
