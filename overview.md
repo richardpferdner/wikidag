@@ -29,8 +29,24 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
   - supports efficient page lookups and metadata queries for BSTEM subset
 
 ### Phase 3: Lexical/Search Knowledge
-- tables: bstem_redirects
-- create set of page redirects to the pages in bstem_categoryl_dag
+- tables: redirect > bstem_redirects
+- create semantic equivalence mapping for alternative page titles pointing to BSTEM pages
+- enables lexical search by mapping redirects (e.g., "ML" → "Machine Learning") to canonical pages
+- two implementation approaches available:
+
+#### Approach 1: Simple Single-Hop (Recommended)
+- direct JOIN between redirect and bstem_page tables
+- captures ~85-90% of redirect relationships (single redirects only)
+- execution time: 2-5 minutes
+- complexity: low (single 4-table JOIN)
+- best for initial implementation
+
+#### Approach 3: Comprehensive Chain Resolution  
+- two-stage process with recursive CTE for redirect chains
+- captures ~95-98% of redirect relationships (includes redirect→redirect→target)
+- execution time: 8-15 minutes  
+- complexity: high (recursive queries, 4x more code)
+- use if lexical search coverage proves insufficient with Approach 1
 
 ### Phase 4: Associative/Connect Knowledge
 - tables: pagelinks > bstem_pagelinks  
