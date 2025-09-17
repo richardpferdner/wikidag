@@ -80,17 +80,6 @@ CREATE TABLE bstem_categorylinks (
 - Validate row counts against estimates
 - Performance analysis and optimization recommendations
 
-## Timeline & Milestones
-
-| Level | Duration | Cumulative | Milestone |
-|-------|----------|------------|-----------|
-| 0-2   | 20 sec   | 20 sec     | Root expansion complete |
-| 3-5   | 17 min   | 18 min     | Major categories captured |
-| 6-8   | 15 min   | 33 min     | Mid-level articles collected |
-| 9-12  | 10 min   | 43 min     | Deep tree completion |
-
-**Total Estimated Duration: 43.5 minutes**
-
 ## Success Criteria
 - [ ] 30M articles extracted from BSTEM domains
 - [ ] 2.5M categories in complete hierarchy
