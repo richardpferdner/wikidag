@@ -50,7 +50,7 @@ pagelinks
 
 == New tables in this project ==
 
-bstem_categorylinks
+bstem_categoryl_dag
 +----------------+-------------+------+-----+-------------------+
 | Field          | Type        | Null | Key | Default           |
 +----------------+-------------+------+-----+-------------------+
