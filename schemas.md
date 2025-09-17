@@ -38,7 +38,6 @@ page
 | page_lang          | varbinary(35)    | YES  |     | NULL    |
 +--------------------+------------------+------+-----+---------+
 
-
 pagelinks
 +-------------------+-----------------+------+-----+---------+
 | Field             | Type            | Null | Key | Default | 
@@ -47,6 +46,24 @@ pagelinks
 | pl_from_namespace | int             | NO   | MUL | 0       |
 | pl_target_id      | bigint unsigned | NO   | PRI | NULL    |
 +-------------------+-----------------+------+-----+---------+
+
+redirect
++---------------+------------------+------+-----+---------+
+| Field         | Type             | Null | Key | Default |
++---------------+------------------+------+-----+---------+
+| rd_from       | int(8) unsigned  | NO   | PRI | 0       |
+| rd_namespace  | int(11)          | NO   | MUL | 0       |
+| rd_title      | varbinary(255)   | NO   | MUL |         |
+| rd_interwiki  | varbinary(32)    | YES  |     | NULL    |
+| rd_fragment   | varbinary(255)   | YES  |     | NULL    |
++---------------+------------------+------+-----+---------+
+Notes:
+- rd_from → page_id of the redirect page
+- rd_namespace, rd_title → target page location
+- rd_interwiki → for interwiki redirects (usually empty for local redirects)
+- rd_fragment → for redirects to page sections (usually empty)
+- Maps redirect sources to their destinations
+
 
 == New tables in this project ==
 
