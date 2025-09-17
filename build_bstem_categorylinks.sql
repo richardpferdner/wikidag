@@ -1,8 +1,8 @@
--- Optimized BSTEM Category Tree Builder
+-- Optimized BSTEM Category Tree Builder (Idempotent)
 -- Key improvements: LEFT JOIN anti-pattern, dynamic batching, transaction management
 
--- Create main table with optimized indexing
-CREATE TABLE bstem_categorylinks (
+-- Create main table with optimized indexing (idempotent)
+CREATE TABLE IF NOT EXISTS bstem_categorylinks (
   page_id INT NOT NULL,
   page_title VARCHAR(255) NOT NULL,
   page_namespace INT NOT NULL,
@@ -18,12 +18,12 @@ CREATE TABLE bstem_categorylinks (
   UNIQUE KEY uk_page_root (page_id, root_category)
 ) ENGINE=InnoDB;
 
--- Enhanced indexes on existing tables
-ALTER TABLE categorylinks ADD INDEX idx_target_type (cl_target_id, cl_type) IF NOT EXISTS;
-ALTER TABLE page ADD INDEX idx_namespace_title (page_namespace, page_title) IF NOT EXISTS;
+-- Enhanced indexes on existing tables (idempotent)
+CREATE INDEX IF NOT EXISTS idx_target_type ON categorylinks (cl_target_id, cl_type);
+CREATE INDEX IF NOT EXISTS idx_namespace_title ON page (page_namespace, page_title);
 
--- Progress tracking with performance metrics
-CREATE TABLE build_progress (
+-- Progress tracking with performance metrics (idempotent)
+CREATE TABLE IF NOT EXISTS build_progress (
   iteration INT AUTO_INCREMENT PRIMARY KEY,
   root_category VARCHAR(255),
   start_level INT,
@@ -36,14 +36,17 @@ CREATE TABLE build_progress (
   timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- Error handling table
-CREATE TABLE build_errors (
+-- Error handling table (idempotent)
+CREATE TABLE IF NOT EXISTS build_errors (
   error_id INT AUTO_INCREMENT PRIMARY KEY,
   iteration INT,
   error_message TEXT,
   sql_state VARCHAR(5),
   timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
+
+-- Drop existing procedure before recreating (idempotent)
+DROP PROCEDURE IF EXISTS BuildBSTEMTree;
 
 -- Stored procedure for dynamic batch processing
 DELIMITER $$
@@ -76,14 +79,12 @@ BEGIN
     RESIGNAL;
   END;
 
-  -- Initialize root categories if empty
-  IF (SELECT COUNT(*) FROM bstem_categorylinks) = 0 THEN
-    INSERT INTO bstem_categorylinks (page_id, page_title, page_namespace, level, root_category, is_leaf)
-    SELECT page_id, page_title, page_namespace, 0, page_title, FALSE
-    FROM page 
-    WHERE page_namespace = 14 
-    AND page_title IN ('Science','Technology','Mathematics','Engineering','Business');
-  END IF;
+  -- Initialize root categories if empty (idempotent)
+  INSERT IGNORE INTO bstem_categorylinks (page_id, page_title, page_namespace, level, root_category, is_leaf)
+  SELECT page_id, page_title, page_namespace, 0, page_title, FALSE
+  FROM page 
+  WHERE page_namespace = 14 
+  AND page_title IN ('Business','Science','Technology','Engineering','Mathematics');
 
   -- Main processing loop
   WHILE v_current_level < p_max_level AND v_continue DO
@@ -126,7 +127,7 @@ BEGIN
       JOIN categorylinks cl ON tcl.page_id = cl.cl_target_id
       JOIN page p ON cl.cl_from = p.page_id
       LEFT JOIN bstem_categorylinks existing ON p.page_id = existing.page_id
-      WHERE cl.cl_type IN ('page', 'subcat')
+      WHERE cl.cl_type IN ('page', 'subcat')  -- Exclude files as per overview.md
         AND existing.page_id IS NULL  -- Anti-join pattern instead of NOT IN
         AND p.page_namespace IN (0, 14)  -- Articles and categories only
       LIMIT v_batch_size;
@@ -170,8 +171,8 @@ BEGIN
 END$$
 DELIMITER ;
 
--- Optimized monitoring queries
-CREATE VIEW progress_summary AS
+-- Optimized monitoring queries (idempotent)
+CREATE OR REPLACE VIEW progress_summary AS
 SELECT 
   root_category,
   COUNT(*) as total_pages,
@@ -184,8 +185,8 @@ FROM bstem_categorylinks
 GROUP BY root_category
 ORDER BY total_pages DESC;
 
--- Performance analysis query
-CREATE VIEW performance_metrics AS
+-- Performance analysis query (idempotent)
+CREATE OR REPLACE VIEW performance_metrics AS
 SELECT 
   iteration,
   root_category,
