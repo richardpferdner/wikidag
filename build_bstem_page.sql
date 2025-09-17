@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS bstem_page (
   INDEX idx_leaf (is_leaf)
 ) ENGINE=InnoDB;
 
--- Insert only new pages from extended bstem_categorylinks
+-- Insert only new pages from extended bstem_categoryl_dag
 INSERT IGNORE INTO bstem_page (
   page_id, page_namespace, page_title, page_is_redirect, page_is_new,
   page_random, page_touched, page_links_updated, page_latest, page_len,
@@ -48,7 +48,7 @@ SELECT
   GROUP_CONCAT(DISTINCT bcl.root_category ORDER BY bcl.root_category) as root_categories,
   MAX(bcl.is_leaf) as is_leaf
 FROM page p
-JOIN bstem_categorylinks bcl ON p.page_id = bcl.page_id
+JOIN bstem_categoryl_dag bcl ON p.page_id = bcl.page_id
 LEFT JOIN bstem_page existing ON p.page_id = existing.page_id
 WHERE existing.page_id IS NULL
 GROUP BY p.page_id, p.page_namespace, p.page_title, p.page_is_redirect, 
