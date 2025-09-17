@@ -17,7 +17,7 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
         - exclude files (cl_type = 'file')
         - expand tree through subcategories only, collect articles as terminal nodes
 
-### Phase 2: Lexical/Search Knowledge
+### Phase 2: Redue Page Tree
     - tables: page > bstem_page
     - create materialized page table containing all pages from BSTEM category tree
       - deduplicate pages appearing in multiple BSTEM categories
@@ -27,11 +27,12 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
         - root_categories: comma-separated list of BSTEM domains page belongs to
         - is_leaf: whether page is article (namespace 0) or category (namespace 14)
       - supports efficient page lookups and metadata queries for BSTEM subset
-    - later: 
-      - import into postgres vector database
-      - add semantic/lexical similarity vectors based on page titles
-  
-### Phase 3: Associative/Connect Knowledge
+
+### Phase 3: Lexical/Search Knowledge
+    - tables: bstem_redirects
+    - create set of page redirects to the pages in bstem_categorylinks
+
+### Phase 4: Associative/Connect Knowledge
     - tables: pagelinks > bstem_pagelinks  
     - create filtered pagelinks dataset for BSTEM tree
       - both source and target pages must exist in bstem_page
