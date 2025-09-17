@@ -1,11 +1,11 @@
 # BSTEM Wikipedia Category Tree Builder
 
 ## Overview
-Extract and materialize a DAG tree of Wikipedia categories and articles for Business, Science, Technology, Engineering, and Mathematics domains from existing Wikipedia database dumps.
+Extract and materialize a DAG tree of Wikipedia categories and articles for Business, Science, Technology, Engineering, and Mathematics domains from existing Wikipedia database dumps across three phases.
 
 ## Summary
 
-### hierarchical/classify knowledge
+### Phase 1: Hierarchical/Classify Knowledge
     - tables: categorylinks > bstem_categorylinks
       - add column to table: level 0 for top categories
     - create DAG tree of these categories from categorylinks
@@ -17,18 +17,26 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
         - exclude files (cl_type = 'file')
         - expand tree through subcategories only, collect articles as terminal nodes
 
-### lexical/search knowledge
-    - create CG dataset of page redirects to the pages in dag-bstem tree
-      - add page title to each
-      - later: 
-        - import into postres vector 
-        - add vectors based on page title sematic/lexical similarities
+### Phase 2: Lexical/Search Knowledge
+    - tables: page > bstem_page
+    - create materialized page table containing all pages from BSTEM category tree
+      - deduplicate pages appearing in multiple BSTEM categories
+      - preserve original Wikipedia page metadata (redirects, length, content model, etc.)
+      - add BSTEM-specific metadata:
+        - min_level: minimum depth where page appears in hierarchy
+        - root_categories: comma-separated list of BSTEM domains page belongs to
+        - is_leaf: whether page is article (namespace 0) or category (namespace 14)
+      - supports efficient page lookups and metadata queries for BSTEM subset
+    - later: 
+      - import into postgres vector database
+      - add semantic/lexical similarity vectors based on page titles
   
-### associative/connect knowledge
-    - create CG dataset of category links in dag-bstem tree
-      - both to and from links must be in dag-bstem tree
-    - add page links in dag-bstem that are not the same page
-      - both to and from links must be in dag-bstem tree
+### Phase 3: Associative/Connect Knowledge
+    - tables: pagelinks > bstem_pagelinks  
+    - create filtered pagelinks dataset for BSTEM tree
+      - both source and target pages must exist in bstem_page
+      - exclude self-links (same page references)
+      - maintain link relationships within BSTEM knowledge domain
 
 ## Problem Statement
 - Need efficient access to BSTEM subset of Wikipedia's 63M pages
