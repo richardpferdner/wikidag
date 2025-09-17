@@ -3,6 +3,33 @@
 ## Overview
 Extract and materialize a DAG tree of Wikipedia categories and articles for Business, Science, Technology, Engineering, and Mathematics domains from existing Wikipedia database dumps.
 
+## Summary
+
+### hierarchical/classify knowledge
+    - tables: categorylinks > bstem_categorylinks
+      - add column to table: level 0 for top categories
+    - create DAG tree of these categories from categorylinks
+      - only include top categories of BSTEM (business, science, technology, engineering, mathematics)
+      - each category is a branch of the tree
+      - add page title to each branch category
+      - recursively add all descendant pages (leaves on branches) to each category from categorylinks
+        - add page title to each leaf page
+        - exclude files (cl_type = 'file')
+        - expand tree through subcategories only, collect articles as terminal nodes
+
+### lexical/search knowledge
+    - create CG dataset of page redirects to the pages in dag-bstem tree
+      - add page title to each
+      - later: 
+        - import into postres vector 
+        - add vectors based on page title sematic/lexical similarities
+  
+### associative/connect knowledge
+    - create CG dataset of category links in dag-bstem tree
+      - both to and from links must be in dag-bstem tree
+    - add page links in dag-bstem that are not the same page
+      - both to and from links must be in dag-bstem tree
+
 ## Problem Statement
 - Need efficient access to BSTEM subset of Wikipedia's 63M pages
 - Original categorylinks table (208M rows) and pagelinks table (1.5B rows) too large for targeted analysis
