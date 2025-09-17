@@ -38,6 +38,10 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
   - both source and target pages must exist in bstem_page
   - exclude self-links (same page references)
   - maintain link relationships within BSTEM knowledge domain
+ 
+### Phase 5: Clean up
+- Remove table elements that are not useful
+  - is-new 
 
 ## Problem Statement
 - Need efficient access to BSTEM subset of Wikipedia's 63M pages
