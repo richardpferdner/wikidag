@@ -48,5 +48,24 @@ pagelinks
 | pl_target_id      | bigint unsigned | NO   | PRI | NULL    |
 +-------------------+-----------------+------+-----+---------+
 
-== New tables in this project
+== New tables in this project ==
 
+bstem_categorylinks
++----------------+-------------+------+-----+-------------------+
+| Field          | Type        | Null | Key | Default           |
++----------------+-------------+------+-----+-------------------+
+| page_id        | int         | NO   | PRI | NULL              |
+| page_title     | varchar(255)| NO   |     |                   |
+| page_namespace | int         | NO   | MUL | NULL              |
+| level          | int         | NO   | MUL | NULL              |
+| root_category  | varchar(255)| NO   | MUL | NULL              |
+| is_leaf        | tinyint(1)  | NO   | MUL | 0                 |
+| created_at     | timestamp   | YES  |     | CURRENT_TIMESTAMP |
++----------------+-------------+------+-----+-------------------+
+
+Notes:
+- Materialized DAG tree of BSTEM (Business, Science, Technology, Engineering, Mathematics) categories and articles
+- level → depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
+- is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
+- root_category → which of the 5 main BSTEM domains this page belongs to
+- Indexes: PRIMARY KEY (page_id), idx_root_level (root_category, level), idx_level_leaf (level, is_leaf), idx_namespace (page_namespace), UNIQUE KEY uk_page_root (page_id, root_category)
