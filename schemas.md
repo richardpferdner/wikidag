@@ -37,6 +37,12 @@ page: 63,942,562 rows
 | page_content_model | varbinary(32)    | YES  |     | NULL    |
 | page_lang          | varbinary(35)    | YES  |     | NULL    |
 +--------------------+------------------+------+-----+---------+
+Notes:
+- page_namespace:
+ - 0 = article
+ - 14 = category
+- page_content_model
+ - 'wikitext' - most articles
 
 pagelinks: 1,586,173,596 rows
 +-------------------+-----------------+------+-----+---------+
