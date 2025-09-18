@@ -45,7 +45,23 @@ CREATE TABLE IF NOT EXISTS gsss_roots (
   INDEX idx_page_id (page_id)
 ) ENGINE=InnoDB;
 
+-- Build state tracking table
+CREATE TABLE IF NOT EXISTS build_state (
+  state_key VARCHAR(255) PRIMARY KEY,
+  state_value INT NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
 
+-- Cycle detection results table
+CREATE TABLE IF NOT EXISTS gsss_cycles (
+  page_id INT UNSIGNED NOT NULL,
+  ancestor_id INT UNSIGNED NOT NULL,
+  path_length INT NOT NULL,
+  detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_page (page_id),
+  INDEX idx_ancestor (ancestor_id),
+  INDEX idx_path_length (path_length)
+) ENGINE=InnoDB;
 
 -- ========================================
 -- PERFORMANCE INDEXES ON SOURCE TABLES
@@ -81,7 +97,7 @@ SELECT 5, 'Mathematics', page_id FROM page WHERE page_namespace = 14 AND page_ti
 -- ========================================
 
 DROP PROCEDURE IF EXISTS GetBuildLevelRange;
-DELIMITER $
+DELIMITER $$
 CREATE PROCEDURE GetBuildLevelRange(
   IN p_begin_level INT,
   IN p_end_level INT,
@@ -121,12 +137,12 @@ BEGIN
     SET v_actual_begin = 0;
     SET v_actual_end = p_end_level;
   END IF;
-END$
+END$$
 DELIMITER ;
 
 -- Cycle detection procedure
 DROP PROCEDURE IF EXISTS DetectCycles;
-DELIMITER $
+DELIMITER $$
 CREATE PROCEDURE DetectCycles(IN p_max_depth INT DEFAULT 10)
 BEGIN
   TRUNCATE TABLE gsss_cycles;
@@ -159,7 +175,7 @@ BEGIN
     COUNT(*) AS cycles_detected,
     AVG(path_length) AS avg_cycle_length
   FROM gsss_cycles;
-END$
+END$$
 DELIMITER ;
 
 -- ========================================
@@ -333,6 +349,10 @@ BEGIN
     
   END WHILE;
   
+  -- Update completed level
+  INSERT INTO build_state (state_key, state_value) 
+  VALUES ('last_completed_level', v_current_level - 1)
+  ON DUPLICATE KEY UPDATE state_value = v_current_level - 1;
   
   -- Report results
   SELECT 
@@ -345,7 +365,7 @@ BEGIN
     (SELECT COUNT(*) FROM gsss_page) AS total_pages_now,
     ROUND(UNIX_TIMESTAMP(3) - v_start_time, 2) AS total_execution_time_sec;
 
-END$
+END$$
 DELIMITER ;
 
 -- ========================================
@@ -354,7 +374,7 @@ DELIMITER ;
 
 -- Resume build from last completed level
 DROP PROCEDURE IF EXISTS ResumeBuild;
-DELIMITER $
+DELIMITER $$
 CREATE PROCEDURE ResumeBuild(IN p_target_level INT DEFAULT 12)
 BEGIN
   DECLARE v_last_level INT DEFAULT -1;
@@ -364,7 +384,7 @@ BEGIN
   WHERE state_key = 'last_completed_level';
   
   CALL BuildGSSSPageTree(v_last_level + 1, p_target_level);
-END$
+END$$
 DELIMITER ;
 
 -- ========================================
