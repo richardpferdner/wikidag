@@ -2,7 +2,7 @@
 -- Key improvements: LEFT JOIN anti-pattern, dynamic batching, transaction management
 
 -- Create main table with optimized indexing (idempotent)
-CREATE TABLE IF NOT EXISTS bstem_categoryl_dag (
+CREATE TABLE IF NOT EXISTS bstem_category_dag (
   page_id INT NOT NULL,
   page_title VARCHAR(255) NOT NULL,
   page_namespace INT NOT NULL,
@@ -80,7 +80,7 @@ BEGIN
   END;
 
   -- Initialize root categories if empty (idempotent)
-  INSERT IGNORE INTO bstem_categoryl_dag (page_id, page_title, page_namespace, level, root_category, is_leaf)
+  INSERT IGNORE INTO bstem_category_dag (page_id, page_title, page_namespace, level, root_category, is_leaf)
   SELECT page_id, page_title, page_namespace, 0, page_title, FALSE
   FROM page 
   WHERE page_namespace = 14 
@@ -106,7 +106,7 @@ BEGIN
     -- Populate with categories to expand
     INSERT INTO temp_current_level
     SELECT page_id, root_category, level 
-    FROM bstem_categoryl_dag 
+    FROM bstem_category_dag 
     WHERE level = v_current_level AND is_leaf = FALSE;
     
     -- Exit if no more categories to process
@@ -114,7 +114,7 @@ BEGIN
       SET v_continue = FALSE;
     ELSE
       -- Process next level using LEFT JOIN anti-pattern
-      INSERT IGNORE INTO bstem_categoryl_dag 
+      INSERT IGNORE INTO bstem_category_dag 
         (page_id, page_title, page_namespace, level, root_category, is_leaf)
       SELECT DISTINCT 
         p.page_id, 
@@ -126,7 +126,7 @@ BEGIN
       FROM temp_current_level tcl
       JOIN categorylinks cl ON tcl.page_id = cl.cl_target_id
       JOIN page p ON cl.cl_from = p.page_id
-      LEFT JOIN bstem_categoryl_dag existing ON p.page_id = existing.page_id
+      LEFT JOIN bstem_category_dag existing ON p.page_id = existing.page_id
       WHERE cl.cl_type IN ('page', 'subcat')  -- Exclude files as per overview.md
         AND existing.page_id IS NULL  -- Anti-join pattern instead of NOT IN
         AND p.page_namespace IN (0, 14)  -- Articles and categories only
@@ -154,7 +154,7 @@ BEGIN
              v_rows_added, v_execution_time, v_rows_per_sec,
              (SELECT ROUND(SUM(DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2)
               FROM information_schema.TABLES 
-              WHERE TABLE_NAME = 'bstem_categoryl_dag');
+              WHERE TABLE_NAME = 'bstem_category_dag');
     END IF;
     
     DROP TEMPORARY TABLE temp_current_level;
@@ -181,7 +181,7 @@ SELECT
   SUM(CASE WHEN is_leaf = TRUE THEN 1 ELSE 0 END) as articles,
   MIN(created_at) as first_created,
   MAX(created_at) as last_created
-FROM bstem_categoryl_dag 
+FROM bstem_category_dag 
 GROUP BY root_category
 ORDER BY total_pages DESC;
 
@@ -209,14 +209,14 @@ SELECT
          ' | Categories: ', FORMAT(SUM(CASE WHEN is_leaf=0 THEN 1 ELSE 0 END), 0),
          ' | Articles: ', FORMAT(SUM(CASE WHEN is_leaf=1 THEN 1 ELSE 0 END), 0),
          ' | Last Updated: ', DATE_FORMAT(MAX(created_at), '%H:%i:%s')) as status
-FROM bstem_categoryl_dag;
+FROM bstem_category_dag;
 
 -- Check for remaining work
 SELECT 
   level,
   root_category,
   COUNT(*) as categories_to_expand
-FROM bstem_categoryl_dag 
+FROM bstem_category_dag 
 WHERE is_leaf = FALSE 
 GROUP BY level, root_category
 HAVING COUNT(*) > 0
