@@ -13,12 +13,12 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Scie
 - Enable fast exploration through hierarchical relationships
 - Maintain DAG structure integrity (no cycles, proper parent-child relationships)
 - Complete build in <10 hours on Mac Studio M4 64GB
-- Final system accesses only new GSSS_* tables, not original enwiki tables
+- Final system accesses only new gsss_* tables, not original enwiki tables
 
 ## Solution
 
 ### Phase 1: Build GSSS Page Tree
-- Source tables: categorylinks, page → GSSS_page
+- Source tables: categorylinks, page → gsss_page
 - Build materialized DAG tree containing all GSSS categories and articles
 - Start with root categories: Business, Science, Technology, Engineering, Mathematics (level 0)
 - Recursively traverse categorylinks to build complete hierarchy:
@@ -32,25 +32,25 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Scie
 - Handles pages appearing in multiple GSSS categories through deduplication
 
 ### Phase 2: Build Lexical Search Mapping  
-- Source tables: redirect → GSSS_lexical_link
+- Source tables: redirect → gsss_lexical_link
 - Create semantic equivalence mapping for alternative page titles
 - Enables lexical search by mapping redirects (e.g., "ML" → "Machine Learning") to canonical pages
 - Schema:
   - ll_from_title: lexical/semantic string from redirect page title
-  - ll_to_page_id: target page_id in GSSS_page
+  - ll_to_page_id: target page_id in gsss_page
   - ll_to_fragment: optional section anchor within target page
 - Two implementation approaches:
   - Simple Single-Hop: direct JOIN (85-90% coverage, 2-5 minutes)
   - Comprehensive Chain Resolution: recursive CTE (95-98% coverage, 8-15 minutes)
 
 ### Phase 3: Build Associative Link Network
-- Source tables: pagelinks, categorylinks → GSSS_associative_link
+- Source tables: pagelinks, categorylinks → gsss_associative_link
 - Create filtered link datasets for GSSS associative link relationships
-- GSSS_associative_link: Unified relationship tracking with type classification
+- gsss_associative_link: Unified relationship tracking with type classification
   - al_from_page_id: source page ID
   - al_to_page_id: target page ID
   - al_type: relationship origin ('pagelink', 'categorylink', 'both')
 
-- Only include links where both source and target exist in GSSS_page
+- Only include links where both source and target exist in gsss_page
 - Exclude self-links
 - Maintains link relationships within GSSS knowledge domain
