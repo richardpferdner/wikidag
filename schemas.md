@@ -112,7 +112,6 @@ Notes:
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - page_root_id → which of the 5 main BSTEM domains this page belongs to
 
-
 bstem_redirect: Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
 | Field          | Type             | Null | Key | Default |
@@ -138,3 +137,40 @@ High value:
 - pl_from: page.page_id of page the link is coming from
 - pl_target_id - page.page_id of page linked going to 
 
+bstem_roots: Root category mapping
++----------+--------------+------+-----+---------+
+| Field    | Type         | Null | Key | Default |
++----------+--------------+------+-----+---------+
+| root_id  | int          | NO   | PRI | NULL    |
+| root_name| varchar(255) | NO   | MUL |         |
+| page_id  | int unsigned | NO   | MUL | NULL    |
++----------+--------------+------+-----+---------+
+Notes:
+- Maps BSTEM root categories to IDs (1=Business, 2=Science, 3=Technology, 4=Engineering, 5=Mathematics)
+- Used for efficient root_id lookups in bstem_page
+
+build_state: Build process state tracking
++------------+----------+------+-----+---------+
+| Field      | Type     | Null | Key | Default |
++------------+----------+------+-----+---------+
+| state_key  | varchar(50) | NO | PRI |         |
+| state_value| text     | YES  |     | NULL    |
+| updated_at | timestamp| NO   |     | CURRENT_TIMESTAMP |
++------------+----------+------+-----+---------+
+Notes:
+- Tracks build progress for mid-level restart capability
+- Key states: 'last_completed_level', 'last_attempted_level', 'total_pages'
+
+bstem_cycles: Cycle detection results
++-------------+--------------+------+-----+---------+
+| Field       | Type         | Null | Key | Default |
++-------------+--------------+------+-----+---------+
+| page_id     | int unsigned | NO   | PRI | NULL    |
+| ancestor_id | int unsigned | NO   | PRI | NULL    |
+| path_length | int          | NO   |     | NULL    |
+| detected_at | timestamp    | NO   | MUL | CURRENT_TIMESTAMP |
++-------------+--------------+------+-----+---------+
+Notes:
+- Stores detected cycles in category hierarchy
+- page_id = ancestor_id indicates a cycle
+- path_length = number of hops in the cycle
