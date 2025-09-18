@@ -151,7 +151,7 @@ gsss_roots: Root category mapping
 | page_id  | int unsigned | NO   | MUL | NULL    |
 +----------+--------------+------+-----+---------+
 Notes:
-- Maps GSSS root categories to IDs (1=Business, 2=Science, 3=Technology, 4=Engineering, 5=Mathematics)
+- Maps GSSS root categories to IDs (1=Geography, 2=Science, 3=Social Sciences)
 - Used for efficient root_id lookups in gsss_page
 
 gsss_cycles: Cycle detection results
