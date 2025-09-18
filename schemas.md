@@ -112,7 +112,7 @@ Notes:
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - page_root_id → which of the 5 main BSTEM domains this page belongs to
 
-bstem_redirect: Lexical links (this string connects to that page)
+bstem_lexical_link: Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
 | Field          | Type             | Null | Key | Default |
 +----------------+------------------+------+-----+---------+
@@ -125,6 +125,22 @@ Notes:
  - this is the lexical/sematic string to match on for redirect
 - to_page_id: page to redirect to
 - to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
+
+bstem_associative_link: Associative links (conceptual relationships between pages)
++----------------+------------------------------------------+------+-----+---------+
+| Field          | Type                                     | Null | Key | Default |
++----------------+------------------------------------------+------+-----+---------+
+| al_from_page_id| int unsigned                             | NO   | PRI | NULL    |
+| al_to_page_id  | int unsigned                             | NO   | PRI | NULL    |
+| al_type        | enum('pagelink','categorylink','both')   | NO   |     | NULL    |
++----------------+------------------------------------------+------+-----+---------+
+Notes:
+- al_from_page_id: The page ID where the link originates
+- al_to_page_id: The page ID the link points to
+- al_type: Specifies the origin of the relationship
+  - 'pagelink': Relationship from pagelinks table (article-to-article links)
+  - 'categorylink': Relationship from categorylinks table (category membership)
+  - 'both': Relationship exists in both pagelinks and categorylinks
 
 bstem_pagelink: Associative links (the concepts on this page connects to that page)
 +-------------------+-----------------+------+-----+---------+
