@@ -2,7 +2,7 @@ Table Schemas
 
 == From enwiki data dumps ==
 
-categorylinks
+categorylinks: 208,756,116 rows
 +-------------------+------------------------------+------+-----+
 | Field             | Type                         | Null | Key | 
 +-------------------+------------------------------+------+-----+
@@ -20,7 +20,7 @@ Notes:
 - cl_type → what kind of page cl_from is. 
   - cl_type refers to the thing being categorized, i.e. the page identified by cl_from, not the category (cl_to)
 
-page
+page: 63,942,562 rows
 +--------------------+------------------+------+-----+---------+
 | Field              | Type             | Null | Key | Default | 
 +--------------------+------------------+------+-----+---------+
@@ -38,7 +38,7 @@ page
 | page_lang          | varbinary(35)    | YES  |     | NULL    |
 +--------------------+------------------+------+-----+---------+
 
-pagelinks
+pagelinks: 1,586,173,596 rows
 +-------------------+-----------------+------+-----+---------+
 | Field             | Type            | Null | Key | Default | 
 +-------------------+-----------------+------+-----+---------+
@@ -47,7 +47,7 @@ pagelinks
 | pl_target_id      | bigint unsigned | NO   | PRI | NULL    |
 +-------------------+-----------------+------+-----+---------+
 
-redirect
+redirect: 14,843,089 rows
 +---------------+------------------+------+-----+---------+
 | Field         | Type             | Null | Key | Default |
 +---------------+------------------+------+-----+---------+
