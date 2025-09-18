@@ -94,48 +94,46 @@ Notes:
 
 == New tables in this project ==
 
-bstem_page
+bstem_page: DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
 +----------------+------------------+------+-----+--------------+
 | page_id        | int unsigned     | NO   | PRI | NULL         |
 | page_title     | varchar(255)     | NO   | MUL |              |
-| parent_page_id | int              | NO   | PRI | NULL         |
-| root_page_id   | int              | NO   | PRI | NULL         |
-| dag_level      | int              | NO   | MUL | NULL         |
-| is_leaf        | tinyint(1)       | NO   | MUL | 0            |
+| page_parent_id | int              | NO   | PRI | NULL         |
+| page_root_id   | int              | NO   | PRI | NULL         |
+| page_dag_level | int              | NO   | MUL | NULL         |
+| page_is_leaf   | tinyint(1)       | NO   | MUL | 0            |
 +----------------+------------------+------+-----+--------------+
 
 Notes:
 - Materialized DAG tree of BSTEM (Business, Science, Technology, Engineering, Mathematics) categories and articles
-- dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
-- is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
-- root_category → which of the 5 main BSTEM domains this page belongs to
-- Indexes: PRIMARY KEY (page_id), idx_root_level (root_category, level), idx_level_leaf (level, is_leaf), idx_namespace (page_namespace), UNIQUE KEY uk_page_root (page_id, root_category)
-- is_leaf → TRUE for articles (page.page_namespace 0), FALSE for categories (namespace 14)
-- Indexes: PRIMARY KEY (page_id), idx_title (page_title), idx_level (min_level), idx_leaf (is_leaf)
+- page_dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
+- page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
+- page_root_id → which of the 5 main BSTEM domains this page belongs to
+- Indexes: PRIMARY KEY (page_id), idx_root_level (page_root_id, page_dag_level), idx_level_leaf (page_dag_level, page_is_leaf), UNIQUE KEY uk_page_root (page_id, page_root_id)
 
 
-bstem_redirect
-+---------------+------------------+------+-----+---------+
-| Field         | Type             | Null | Key | Default |
-+---------------+------------------+------+-----+---------+
-| from_title    | varbinary(255)   | NO   | MUL |         |
-| to_page_id    | int(8) unsigned  | NO   | PRI | 0       |
-| to_fragment   | varbinary(255)   | YES  |     | NULL    |
-+---------------+------------------+------+-----+---------+
+bstem_redirect: Lexical links (this string connects to that page)
++----------------+------------------+------+-----+---------+
+| Field          | Type             | Null | Key | Default |
++----------------+------------------+------+-----+---------+
+| rd_from_title  | varbinary(255)   | NO   | MUL |         |
+| rd_to_page_id  | int(8) unsigned  | NO   | PRI | 0       |
+| rd_to_fragment | varbinary(255)   | YES  |     | NULL    |
++----------------+------------------+------+-----+---------+
 Notes:
 - from_title: string from the enwiki rd_from's page.page_title
  - this is the lexical/sematic string to match on for redirect
 - to_page_id: page to redirect to
 - to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
-bstem_pagelink
+bstem_pagelink: Associative links (the concepts on this page connects to that page)
 +-------------------+-----------------+------+-----+---------+
 | Field             | Type            | Null | Key | Default | 
 +-------------------+-----------------+------+-----+---------+
-| pl_from           | int unsigned    | NO   | PRI | 0       |
-| pl_target_id      | int unsigned    | NO   | PRI | NULL    |
+| pl_from_page_id   | int unsigned    | NO   | PRI | 0       |
+| pl_to_page_id     | int unsigned    | NO   | PRI | NULL    |
 +-------------------+-----------------+------+-----+---------+
 High value:
 - pl_from: page.page_id of page the link is coming from
