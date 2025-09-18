@@ -6,45 +6,44 @@
 -- TABLE DEFINITIONS
 -- ========================================
 
--- Main BSTEM page table with Wikipedia metadata + DAG fields
+-- Main BSTEM page table matching schemas.md specification
 CREATE TABLE IF NOT EXISTS bstem_page (
   page_id INT UNSIGNED NOT NULL,
-  page_namespace INT NOT NULL,
   page_title VARCHAR(255) NOT NULL,
-  page_is_redirect TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  page_is_new TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  page_random DOUBLE UNSIGNED NOT NULL DEFAULT 0,
-  page_touched BINARY(14) NOT NULL,
-  page_links_updated BINARY(14) NULL,
-  page_latest INT UNSIGNED NOT NULL DEFAULT 0,
-  page_len INT UNSIGNED NOT NULL DEFAULT 0,
-  page_content_model VARCHAR(32) NULL,
-  page_lang VARCHAR(35) NULL,
-  min_level INT NOT NULL,
-  root_categories TEXT NOT NULL,
-  is_leaf BOOLEAN NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  page_parent_id INT NOT NULL,
+  page_root_id INT NOT NULL,
+  page_dag_level INT NOT NULL,
+  page_is_leaf TINYINT(1) NOT NULL DEFAULT 0,
   
   PRIMARY KEY (page_id),
-  INDEX idx_namespace (page_namespace),
   INDEX idx_title (page_title),
-  INDEX idx_redirect (page_is_redirect),
-  INDEX idx_min_level (min_level),
-  INDEX idx_leaf (is_leaf),
-  INDEX idx_root_categories (root_categories(255)),
-  INDEX idx_ns_level (page_namespace, min_level)
+  INDEX idx_parent (page_parent_id),
+  INDEX idx_root (page_root_id),
+  INDEX idx_level (page_dag_level),
+  INDEX idx_leaf (page_is_leaf)
 ) ENGINE=InnoDB;
 
 -- Temporary working table for current build iteration
 CREATE TABLE IF NOT EXISTS bstem_work (
   page_id INT UNSIGNED NOT NULL,
-  root_category VARCHAR(255) NOT NULL,
+  parent_id INT UNSIGNED NOT NULL,
+  root_id INT NOT NULL,
   level INT NOT NULL,
   
-  PRIMARY KEY (page_id, root_category),
+  PRIMARY KEY (page_id, parent_id),
   INDEX idx_level (level),
-  INDEX idx_page_id (page_id)
+  INDEX idx_root (root_id),
+  INDEX idx_parent (parent_id)
 ) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
+
+-- Root category mapping
+CREATE TABLE IF NOT EXISTS bstem_roots (
+  root_id INT PRIMARY KEY,
+  root_name VARCHAR(255) NOT NULL,
+  page_id INT UNSIGNED NOT NULL,
+  INDEX idx_name (root_name),
+  INDEX idx_page_id (page_id)
+) ENGINE=InnoDB;
 
 -- Progress tracking table
 CREATE TABLE IF NOT EXISTS build_progress (
@@ -92,6 +91,22 @@ CREATE INDEX IF NOT EXISTS idx_page_ns_title ON page (page_namespace, page_title
 CREATE INDEX IF NOT EXISTS idx_page_id_ns ON page (page_id, page_namespace);
 
 -- ========================================
+-- INITIALIZATION
+-- ========================================
+
+-- Initialize root category mapping
+INSERT IGNORE INTO bstem_roots (root_id, root_name, page_id)
+SELECT 1, 'Business', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Business'
+UNION ALL
+SELECT 2, 'Science', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Science'  
+UNION ALL
+SELECT 3, 'Technology', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Technology'
+UNION ALL
+SELECT 4, 'Engineering', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Engineering'
+UNION ALL
+SELECT 5, 'Mathematics', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Mathematics';
+
+-- ========================================
 -- HELPER PROCEDURES
 -- ========================================
 
@@ -109,7 +124,7 @@ BEGIN
   DECLARE v_min_existing_level INT DEFAULT 999;
   
   -- Check what levels already exist
-  SELECT COALESCE(MIN(min_level), 999), COALESCE(MAX(min_level), -1)
+  SELECT COALESCE(MIN(page_dag_level), 999), COALESCE(MAX(page_dag_level), -1)
   INTO v_min_existing_level, v_max_existing_level
   FROM bstem_page;
   
@@ -190,14 +205,13 @@ BEGIN
   
   IF v_actual_begin = 0 AND NOT v_has_existing_data THEN
     -- Fresh build: start with root categories
-    INSERT INTO bstem_work (page_id, root_category, level)
+    INSERT INTO bstem_work (page_id, parent_id, root_id, level)
     SELECT 
-      p.page_id,
-      p.page_title,
+      br.page_id,
+      0,  -- Root categories have no parent
+      br.root_id,
       0
-    FROM page p
-    WHERE p.page_namespace = 14
-      AND p.page_title IN ('Business', 'Science', 'Technology', 'Engineering', 'Mathematics');
+    FROM bstem_roots br;
     
     SET v_parent_pages = ROW_COUNT();
     
@@ -207,13 +221,14 @@ BEGIN
     
   ELSE
     -- Incremental build: use existing data as parents
-    INSERT INTO bstem_work (page_id, root_category, level)
+    INSERT INTO bstem_work (page_id, parent_id, root_id, level)
     SELECT 
       bp.page_id,
-      SUBSTRING_INDEX(bp.root_categories, ',', 1) AS primary_root,
-      bp.min_level
+      bp.page_parent_id,
+      bp.page_root_id,
+      bp.page_dag_level
     FROM bstem_page bp
-    WHERE bp.min_level = v_actual_begin - 1;
+    WHERE bp.page_dag_level = v_actual_begin - 1;
     
     SET v_parent_pages = ROW_COUNT();
     
@@ -243,15 +258,17 @@ BEGIN
     -- Create temporary table for this level's results
     CREATE TEMPORARY TABLE level_candidates (
       page_id INT UNSIGNED NOT NULL,
-      root_category VARCHAR(255) NOT NULL,
-      PRIMARY KEY (page_id, root_category)
+      parent_id INT UNSIGNED NOT NULL,
+      root_id INT NOT NULL,
+      PRIMARY KEY (page_id, parent_id, root_id)
     ) ENGINE=MEMORY;
     
     -- Find children of current level parents, batch by batch
-    INSERT INTO level_candidates (page_id, root_category)
+    INSERT INTO level_candidates (page_id, parent_id, root_id)
     SELECT DISTINCT
       cl.cl_from,
-      w.root_category
+      w.page_id,
+      w.root_id
     FROM bstem_work w
     INNER JOIN categorylinks cl ON w.page_id = cl.cl_target_id
     INNER JOIN page p ON cl.cl_from = p.page_id
@@ -264,34 +281,23 @@ BEGIN
       );
     
     -- Add new candidates to work table
-    INSERT IGNORE INTO bstem_work (page_id, root_category, level)
-    SELECT page_id, root_category, v_current_level
+    INSERT IGNORE INTO bstem_work (page_id, parent_id, root_id, level)
+    SELECT page_id, parent_id, root_id, v_current_level
     FROM level_candidates;
     
     SET v_rows_added = ROW_COUNT();
     
-    -- Process candidates in batches and add to final table
+    -- Process candidates and add to final table (handle multiple parents by selecting first)
     INSERT IGNORE INTO bstem_page (
-      page_id, page_namespace, page_title, page_is_redirect, page_is_new,
-      page_random, page_touched, page_links_updated, page_latest, page_len,
-      page_content_model, page_lang, min_level, root_categories, is_leaf
+      page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf
     )
     SELECT 
       p.page_id,
-      p.page_namespace,
       p.page_title,
-      p.page_is_redirect,
-      p.page_is_new,
-      p.page_random,
-      p.page_touched,
-      p.page_links_updated,
-      p.page_latest,
-      p.page_len,
-      p.page_content_model,
-      p.page_lang,
-      v_current_level AS min_level,
-      GROUP_CONCAT(DISTINCT lc.root_category ORDER BY lc.root_category SEPARATOR ',') AS root_categories,
-      (p.page_namespace = 0) AS is_leaf
+      MIN(lc.parent_id) AS page_parent_id,  -- Select first parent for DAG simplification
+      MIN(lc.root_id) AS page_root_id,      -- Select first root for primary classification
+      v_current_level AS page_dag_level,
+      (p.page_namespace = 0) AS page_is_leaf
     FROM level_candidates lc
     INNER JOIN page p ON lc.page_id = p.page_id
     GROUP BY p.page_id
@@ -357,9 +363,9 @@ CREATE OR REPLACE VIEW build_status AS
 SELECT 
   bs1.state_value AS last_completed_level,
   bs2.state_value AS total_pages,
-  (SELECT MAX(min_level) FROM bstem_page) AS current_max_level,
-  (SELECT MIN(min_level) FROM bstem_page) AS current_min_level,
-  (SELECT COUNT(DISTINCT SUBSTRING_INDEX(root_categories, ',', 1)) FROM bstem_page) AS root_domains
+  (SELECT MAX(page_dag_level) FROM bstem_page) AS current_max_level,
+  (SELECT MIN(page_dag_level) FROM bstem_page) AS current_min_level,
+  (SELECT COUNT(DISTINCT page_root_id) FROM bstem_page) AS root_domains
 FROM build_state bs1
 LEFT JOIN build_state bs2 ON bs2.state_key = 'total_pages'
 WHERE bs1.state_key = 'last_completed_level';
@@ -367,28 +373,27 @@ WHERE bs1.state_key = 'last_completed_level';
 -- Summary by root category  
 CREATE OR REPLACE VIEW bstem_summary AS
 SELECT 
-  SUBSTRING_INDEX(root_categories, ',', 1) AS primary_root,
+  br.root_name AS root_category,
   COUNT(*) AS total_pages,
-  SUM(CASE WHEN is_leaf = TRUE THEN 1 ELSE 0 END) AS articles,
-  SUM(CASE WHEN is_leaf = FALSE THEN 1 ELSE 0 END) AS categories,
-  MIN(min_level) AS min_depth,
-  MAX(min_level) AS max_depth,
-  ROUND(AVG(page_len), 0) AS avg_page_length
-FROM bstem_page
-GROUP BY SUBSTRING_INDEX(root_categories, ',', 1)
+  SUM(CASE WHEN bp.page_is_leaf = TRUE THEN 1 ELSE 0 END) AS articles,
+  SUM(CASE WHEN bp.page_is_leaf = FALSE THEN 1 ELSE 0 END) AS categories,
+  MIN(bp.page_dag_level) AS min_depth,
+  MAX(bp.page_dag_level) AS max_depth
+FROM bstem_page bp
+JOIN bstem_roots br ON bp.page_root_id = br.root_id
+GROUP BY bp.page_root_id, br.root_name
 ORDER BY total_pages DESC;
 
 -- Level distribution
 CREATE OR REPLACE VIEW bstem_level_distribution AS
 SELECT 
-  min_level AS level,
+  page_dag_level AS level,
   COUNT(*) AS page_count,
-  SUM(CASE WHEN is_leaf = TRUE THEN 1 ELSE 0 END) AS articles,
-  SUM(CASE WHEN is_leaf = FALSE THEN 1 ELSE 0 END) AS categories,
-  ROUND(AVG(page_len), 0) AS avg_page_length
+  SUM(CASE WHEN page_is_leaf = TRUE THEN 1 ELSE 0 END) AS articles,
+  SUM(CASE WHEN page_is_leaf = FALSE THEN 1 ELSE 0 END) AS categories
 FROM bstem_page
-GROUP BY min_level
-ORDER BY min_level;
+GROUP BY page_dag_level
+ORDER BY page_dag_level;
 
 -- Recent build performance
 CREATE OR REPLACE VIEW build_performance AS
