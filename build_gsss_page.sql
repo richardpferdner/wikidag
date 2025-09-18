@@ -1,13 +1,13 @@
--- BSTEM Wikipedia Category Tree Builder - Phase 1 (Incremental)
--- Builds materialized DAG tree of BSTEM categories and articles
+-- GSSS Wikipedia Category Tree Builder - Phase 1 (Incremental)
+-- Builds materialized DAG tree of GSSS categories and articles
 -- Supports incremental builds with level ranges
 
 -- ========================================
 -- TABLE DEFINITIONS
 -- ========================================
 
--- Main BSTEM page table matching schemas.md specification
-CREATE TABLE IF NOT EXISTS bstem_page (
+-- Main GSSS page table matching schemas.md specification
+CREATE TABLE IF NOT EXISTS gsss_page (
   page_id INT UNSIGNED NOT NULL,
   page_title VARCHAR(255) NOT NULL,
   page_parent_id INT NOT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS bstem_page (
 ) ENGINE=InnoDB;
 
 -- Temporary working table for current build iteration
-CREATE TABLE IF NOT EXISTS bstem_work (
+CREATE TABLE IF NOT EXISTS gsss_work (
   page_id INT UNSIGNED NOT NULL,
   parent_id INT UNSIGNED NOT NULL,
   root_id INT NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS bstem_work (
 ) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
 
 -- Root category mapping
-CREATE TABLE IF NOT EXISTS bstem_roots (
+CREATE TABLE IF NOT EXISTS gsss_roots (
   root_id INT PRIMARY KEY,
   root_name VARCHAR(255) NOT NULL,
   page_id INT UNSIGNED NOT NULL,
@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_page_id_ns ON page (page_id, page_namespace);
 -- ========================================
 
 -- Initialize root category mapping
-INSERT IGNORE INTO bstem_roots (root_id, root_name, page_id)
+INSERT IGNORE INTO gsss_roots (root_id, root_name, page_id)
 SELECT 1, 'Business', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Business'
 UNION ALL
 SELECT 2, 'Science', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Science'  
@@ -96,7 +96,7 @@ BEGIN
   -- Check what levels already exist
   SELECT COALESCE(MAX(page_dag_level), -1)
   INTO v_max_existing_level
-  FROM bstem_page;
+  FROM gsss_page;
   
   -- Check for interrupted build
   SELECT COALESCE(state_value, -1) INTO v_interrupted_level
@@ -129,14 +129,14 @@ DROP PROCEDURE IF EXISTS DetectCycles;
 DELIMITER $
 CREATE PROCEDURE DetectCycles(IN p_max_depth INT DEFAULT 10)
 BEGIN
-  TRUNCATE TABLE bstem_cycles;
+  TRUNCATE TABLE gsss_cycles;
   
   -- Find potential cycles using recursive path checking
-  INSERT INTO bstem_cycles (page_id, ancestor_id, path_length)
+  INSERT INTO gsss_cycles (page_id, ancestor_id, path_length)
   WITH RECURSIVE cycle_check (page_id, ancestor_id, path_length) AS (
     -- Base case: direct parent relationships
     SELECT page_id, page_parent_id, 1
-    FROM bstem_page 
+    FROM gsss_page 
     WHERE page_parent_id > 0
     
     UNION ALL
@@ -144,7 +144,7 @@ BEGIN
     -- Recursive case: follow parent chain
     SELECT cc.page_id, bp.page_parent_id, cc.path_length + 1
     FROM cycle_check cc
-    JOIN bstem_page bp ON cc.ancestor_id = bp.page_id
+    JOIN gsss_page bp ON cc.ancestor_id = bp.page_id
     WHERE bp.page_parent_id > 0 
       AND cc.path_length < p_max_depth
       AND bp.page_parent_id != cc.page_id  -- Detect immediate cycle
@@ -158,7 +158,7 @@ BEGIN
   SELECT 
     COUNT(*) AS cycles_detected,
     AVG(path_length) AS avg_cycle_length
-  FROM bstem_cycles;
+  FROM gsss_cycles;
 END$
 DELIMITER ;
 
@@ -166,10 +166,10 @@ DELIMITER ;
 -- MAIN BUILD PROCEDURE
 -- ========================================
 
-DROP PROCEDURE IF EXISTS BuildBSTEMPageTree;
+DROP PROCEDURE IF EXISTS BuildGSSSPageTree;
 
 DELIMITER $$
-CREATE PROCEDURE BuildBSTEMPageTree(
+CREATE PROCEDURE BuildGSSSPageTree(
   IN p_begin_level INT DEFAULT 0,
   IN p_end_level INT DEFAULT 12,
   IN p_batch_size INT DEFAULT 50000
@@ -203,7 +203,7 @@ BEGIN
   CALL GetBuildLevelRange(p_begin_level, p_end_level, v_actual_begin, v_actual_end, v_has_existing_data);
   
   -- Clear working table and update build state
-  TRUNCATE TABLE bstem_work;
+  TRUNCATE TABLE gsss_work;
   
   -- Track build attempt
   INSERT INTO build_state (state_key, state_value) 
@@ -219,29 +219,29 @@ BEGIN
   
   IF v_actual_begin = 0 AND NOT v_has_existing_data THEN
     -- Fresh build: start with root categories
-    INSERT INTO bstem_work (page_id, parent_id, root_id, level)
+    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
     SELECT 
       br.page_id,
       0,  -- Root categories have no parent
       br.root_id,
       0
-    FROM bstem_roots br;
+    FROM gsss_roots br;
     
     SET v_parent_pages = ROW_COUNT();
     
     IF v_parent_pages = 0 THEN
-      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No root BSTEM categories found';
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No root GSSS categories found';
     END IF;
     
   ELSE
     -- Incremental build: use existing data as parents
-    INSERT INTO bstem_work (page_id, parent_id, root_id, level)
+    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
     SELECT 
       bp.page_id,
       bp.page_parent_id,
       bp.page_root_id,
       bp.page_dag_level
-    FROM bstem_page bp
+    FROM gsss_page bp
     WHERE bp.page_dag_level = v_actual_begin - 1;
     
     SET v_parent_pages = ROW_COUNT();
@@ -283,27 +283,27 @@ BEGIN
       cl.cl_from,
       w.page_id,
       w.root_id
-    FROM bstem_work w
+    FROM gsss_work w
     INNER JOIN categorylinks cl ON w.page_id = cl.cl_target_id
     INNER JOIN page p ON cl.cl_from = p.page_id
     WHERE w.level = (CASE WHEN v_current_level = 0 THEN 0 ELSE v_current_level - 1 END)
       AND cl.cl_type IN ('page', 'subcat')  -- Include pages and subcategories
       AND cl.cl_type != 'file'              -- Explicitly exclude files
       AND p.page_namespace IN (0, 14)       -- Articles and categories only
-      -- Exclude pages already in bstem_page
+      -- Exclude pages already in gsss_page
       AND NOT EXISTS (
-        SELECT 1 FROM bstem_page bp WHERE bp.page_id = cl.cl_from
+        SELECT 1 FROM gsss_page bp WHERE bp.page_id = cl.cl_from
       );
     
     -- Add new candidates to work table
-    INSERT IGNORE INTO bstem_work (page_id, parent_id, root_id, level)
+    INSERT IGNORE INTO gsss_work (page_id, parent_id, root_id, level)
     SELECT page_id, parent_id, root_id, v_current_level
     FROM level_candidates;
     
     SET v_rows_added = ROW_COUNT();
     
     -- Process candidates and add to final table (handle multiple parents by selecting first)
-    INSERT IGNORE INTO bstem_page (
+    INSERT IGNORE INTO gsss_page (
       page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf
     )
     SELECT 
@@ -342,7 +342,7 @@ BEGIN
     v_actual_begin AS actual_begin_level,
     v_current_level - 1 AS actual_end_level,
     v_total_new_pages AS new_pages_added,
-    (SELECT COUNT(*) FROM bstem_page) AS total_pages_now,
+    (SELECT COUNT(*) FROM gsss_page) AS total_pages_now,
     ROUND(UNIX_TIMESTAMP(3) - v_start_time, 2) AS total_execution_time_sec;
 
 END$
@@ -363,7 +363,7 @@ BEGIN
   FROM build_state 
   WHERE state_key = 'last_completed_level';
   
-  CALL BuildBSTEMPageTree(v_last_level + 1, p_target_level);
+  CALL BuildGSSSPageTree(v_last_level + 1, p_target_level);
 END$
 DELIMITER ;
 
@@ -373,15 +373,15 @@ DELIMITER ;
 
 /*
 -- Initial build (levels 0-5):
-CALL BuildBSTEMPageTree(0, 5);
+CALL BuildGSSSPageTree(0, 5);
 
 -- Continue building (levels 6-10):  
-CALL BuildBSTEMPageTree(6, 10);
+CALL BuildGSSSPageTree(6, 10);
 
 -- Resume from last completed level:
 CALL ResumeBuild(12);
 
 -- Check for cycles:
 CALL DetectCycles(15);
-SELECT * FROM bstem_cycles;
+SELECT * FROM gsss_cycles;
 */
