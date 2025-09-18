@@ -12,7 +12,7 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
 - Build materialized BSTEM category DAG covering ~30M articles and 2.5M categories
 - Enable fast exploration through hierarchical relationships
 - Maintain DAG structure integrity (no cycles, proper parent-child relationships)
-- Complete build in <1 hour on Mac Studio M4 64GB
+- Complete build in <10 hours on Mac Studio M4 64GB
 - Final system accesses only new bstem_* tables, not original enwiki tables
 
 ## Solution
