@@ -26,13 +26,13 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
   - Articles become leaf nodes (page_namespace = 0, is_leaf = TRUE)  
   - Exclude files (cl_type = 'file')
 - Schema preserves essential Wikipedia metadata plus DAG-specific fields:
-  - min_level: minimum depth in DAG tree (0 = root BSTEM categories)
-  - root_categories: comma-separated list of root BSTEM domains this page belongs to
-  - is_leaf: TRUE for articles, FALSE for categories
+  - page_dag_level: minimum depth in DAG tree (0 = root BSTEM categories)
+  - page_root_id: which of the 5 main BSTEM domains this page belongs to
+  - page_is_leaf: TRUE for articles, FALSE for categories
 - Handles pages appearing in multiple BSTEM categories through deduplication
 
 ### Phase 2: Build Lexical Search Mapping  
-- Source tables: redirect → bstem_redirect
+- Source tables: redirect → bstem_lexical_link
 - Create semantic equivalence mapping for alternative page titles
 - Enables lexical search by mapping redirects (e.g., "ML" → "Machine Learning") to canonical pages
 - Schema:
@@ -44,12 +44,15 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
   - Comprehensive Chain Resolution: recursive CTE (95-98% coverage, 8-15 minutes)
 
 ### Phase 3: Build Associative Link Network
-- Source tables: pagelinks → bstem_pagelink  
-- Create filtered pagelinks dataset for BSTEM tree
-- Only include links where both source and target exist in bstem_page
-- Exclude self-links
-- Schema:
+- Source tables: pagelinks, categorylinks → bstem_associative_link, bstem_pagelink
+- Create filtered link datasets for BSTEM tree relationships
+- bstem_associative_link: Unified relationship tracking with type classification
+  - al_from_page_id: source page ID
+  - al_to_page_id: target page ID
+  - al_type: relationship origin ('pagelink', 'categorylink', 'both')
+- bstem_pagelink: Traditional pagelinks subset for BSTEM pages
   - pl_from_page_id: source page ID
   - pl_to_page_id: target page ID
+- Only include links where both source and target exist in bstem_page
+- Exclude self-links
 - Maintains link relationships within BSTEM knowledge domain
-     
