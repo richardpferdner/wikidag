@@ -16,13 +16,14 @@ categorylinks: 208,756,116 rows
 | cl_collation_id   | smallint unsigned            | NO   |     | 
 | cl_target_id      | bigint unsigned              | NO   | PRI | 
 +-------------------+------------------------------+------+-----+
-Notes:
+High value: 
 - cl_from - page.page_id of page in category
 - cl_type - 0 = page (page_namespace 0), subcat = subcategory (page_namespace 14)
 - cl_target_id - page.page_id of category 
 - cl_to - string of category, should match category's page_title
 - cl_type → what kind of page cl_from is. 
   - cl_type refers to the thing being categorized, i.e. the page identified by cl_from, not the category (cl_to)
+Notes:
 
 page: 63,942,562 rows
 +--------------------+------------------+------+-----+---------+
@@ -41,12 +42,13 @@ page: 63,942,562 rows
 | page_content_model | varbinary(32)    | YES  |     | NULL    |
 | page_lang          | varbinary(35)    | YES  |     | NULL    |
 +--------------------+------------------+------+-----+---------+
-Notes:
+High value:
 - page_namespace:
  - 0 = article
  - 14 = category
 - page_content_model
  - 'wikitext' - most articles
+Notes:
 
 pagelinks: 1,586,173,596 rows
 +-------------------+-----------------+------+-----+---------+
@@ -56,12 +58,13 @@ pagelinks: 1,586,173,596 rows
 | pl_from_namespace | int             | NO   | MUL | 0       |
 | pl_target_id      | bigint unsigned | NO   | PRI | NULL    |
 +-------------------+-----------------+------+-----+---------+
-Notes:
+High value:
 - pl_from: page.page_id of page the link is coming from
 - pl_from_namespace:
  - 0 = article
  - 14 = category
 - pl_target_id - page.page_id of page linked going to 
+Notes:
 
 redirect: 14,843,089 rows
 +---------------+------------------+------+-----+---------+
@@ -73,7 +76,7 @@ redirect: 14,843,089 rows
 | rd_interwiki  | varbinary(32)    | YES  |     | NULL    |
 | rd_fragment   | varbinary(255)   | YES  |     | NULL    |
 +---------------+------------------+------+-----+---------+
-Notes:
+High value:
 - rd_from: page_id of the redirect page
 - rd_namespace: target page's type
  - 0 = article
@@ -81,6 +84,7 @@ Notes:
 - rd_title: string of target page title, should match target's page_title
 - rd_interwiki: if not null, it is an external link (exclude)
 - rd_fragment: if not null, a string containing the section in the page (e.g. History)
+Notes:
 
 == New tables in this project ==
 
