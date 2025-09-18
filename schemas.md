@@ -17,6 +17,10 @@ categorylinks: 208,756,116 rows
 | cl_target_id      | bigint unsigned              | NO   | PRI | 
 +-------------------+------------------------------+------+-----+
 Notes:
+- cl_from - page.page_id of page in category
+- cl_type - 0 = page (page_namespace 0), subcat = subcategory (page_namespace 14)
+- cl_target_id - page.page_id of category 
+- cl_to - string of category, should match category's page_title
 - cl_type → what kind of page cl_from is. 
   - cl_type refers to the thing being categorized, i.e. the page identified by cl_from, not the category (cl_to)
 
