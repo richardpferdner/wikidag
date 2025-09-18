@@ -67,7 +67,7 @@ Notes:
 
 == New tables in this project ==
 
-bstem_category_dag
+bstem_category
 +----------------+-------------+------+-----+-------------------+
 | Field          | Type        | Null | Key | Default           |
 +----------------+-------------+------+-----+-------------------+
@@ -117,3 +117,17 @@ Notes:
 - root_categories → comma-separated list of BSTEM domains page belongs to
 - is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14)
 - Indexes: PRIMARY KEY (page_id), idx_namespace (page_namespace), idx_title (page_title), idx_redirect (page_is_redirect), idx_min_level (min_level), idx_leaf (is_leaf)
+
+
+bstem_redirect
++--------------------+------------------+------+-----+-------------------+
+| Field              | Type             | Null | Key | Default           |
++--------------------+------------------+------+-----+-------------------+
++--------------------+------------------+------+-----+-------------------+
+
+
+bstem_pagelink
++--------------------+------------------+------+-----+-------------------+
+| Field              | Type             | Null | Key | Default           |
++--------------------+------------------+------+-----+-------------------+
++--------------------+------------------+------+-----+-------------------+
