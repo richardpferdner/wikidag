@@ -131,7 +131,13 @@ Notes:
 - to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
 bstem_pagelink
-+--------------------+------------------+------+-----+-------------------+
-| Field              | Type             | Null | Key | Default           |
-+--------------------+------------------+------+-----+-------------------+
-+--------------------+------------------+------+-----+-------------------+
++-------------------+-----------------+------+-----+---------+
+| Field             | Type            | Null | Key | Default | 
++-------------------+-----------------+------+-----+---------+
+| pl_from           | int unsigned    | NO   | PRI | 0       |
+| pl_target_id      | int unsigned    | NO   | PRI | NULL    |
++-------------------+-----------------+------+-----+---------+
+High value:
+- pl_from: page.page_id of page the link is coming from
+- pl_target_id - page.page_id of page linked going to 
+
