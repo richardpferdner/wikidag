@@ -6,7 +6,7 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Busi
 ## Summary
 
 ### Phase 1: Hierarchical/Classify Knowledge
-- tables: categorylinks > bstem_categoryl_dag
+- tables: categorylinks > bstem_category_dag
   - add column to table: level 0 for top categories
 - create DAG tree of these categories from categorylinks
   - only include top categories of BSTEM (business, science, technology, engineering, mathematics)
