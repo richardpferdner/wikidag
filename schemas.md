@@ -93,18 +93,17 @@ Notes:
 
 == New tables in this project ==
 
-bstem_category
-+----------------+-------------+------+-----+-------------------+
-| Field          | Type        | Null | Key | Default           |
-+----------------+-------------+------+-----+-------------------+
-| page_id        | int         | NO   | PRI | NULL              |
-| page_title     | varchar(255)| NO   |     |                   |
-| page_namespace | int         | NO   | MUL | NULL              |
-| root_page_id   | int         | NO   | PRI | NULL              |
-| level          | int         | NO   | MUL | NULL              |
-| is_leaf        | tinyint(1)  | NO   | MUL | 0                 |
-| created_at     | timestamp   | YES  |     | CURRENT_TIMESTAMP |
-+----------------+-------------+------+-----+-------------------+
+bstem_node
++----------------+------------------+------+-----+--------------+
+| Field          | Type             | Null | Key | Default      |
++----------------+------------------+------+-----+--------------+
+| page_id        | int unsigned     | NO   | PRI | NULL         |
+| page_title     | varchar(255)     | NO   | MUL |              |
+| parent_page_id | int              | NO   | PRI | NULL         |
+| root_page_id   | int              | NO   | PRI | NULL         |
+| level          | int              | NO   | MUL | NULL         |
+| is_leaf        | tinyint(1)       | NO   | MUL | 0            |
++----------------+------------------+------+-----+--------------+
 
 Notes:
 - Materialized DAG tree of BSTEM (Business, Science, Technology, Engineering, Mathematics) categories and articles
@@ -112,37 +111,8 @@ Notes:
 - is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - root_category → which of the 5 main BSTEM domains this page belongs to
 - Indexes: PRIMARY KEY (page_id), idx_root_level (root_category, level), idx_level_leaf (level, is_leaf), idx_namespace (page_namespace), UNIQUE KEY uk_page_root (page_id, root_category)
-
-bstem_page
-+--------------------+------------------+------+-----+-------------------+
-| Field              | Type             | Null | Key | Default           |
-+--------------------+------------------+------+-----+-------------------+
-| page_id            | int unsigned     | NO   | PRI | NULL              |
-| page_namespace     | int              | NO   | MUL | NULL              |
-| page_title         | varchar(255)     | NO   | MUL |                   |
-| page_is_redirect   | tinyint unsigned | NO   | MUL | 0                 |
-| page_is_new        | tinyint unsigned | NO   |     | 0                 |
-| page_random        | double unsigned  | NO   |     | 0                 |
-| page_touched       | binary(14)       | NO   |     | NULL              |
-| page_links_updated | binary(14)       | YES  |     | NULL              |
-| page_latest        | int unsigned     | NO   |     | 0                 |
-| page_len           | int unsigned     | NO   |     | 0                 |
-| page_content_model | varchar(32)      | YES  |     | NULL              |
-| page_lang          | varchar(35)      | YES  |     | NULL              |
-| min_level          | int              | NO   | MUL | NULL              |
-| root_categories    | text             | NO   |     |                   |
-| is_leaf            | boolean          | NO   | MUL | NULL              |
-| created_at         | timestamp        | YES  |     | CURRENT_TIMESTAMP |
-+--------------------+------------------+------+-----+-------------------+
-
-Notes:
-- Materialized page table containing all pages from BSTEM category tree
-- Deduplicates pages appearing in multiple BSTEM categories
-- Preserves original Wikipedia page metadata (redirects, length, content model, etc.)
-- min_level → minimum depth where page appears in hierarchy
-- root_categories → comma-separated list of BSTEM domains page belongs to
-- is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14)
-- Indexes: PRIMARY KEY (page_id), idx_namespace (page_namespace), idx_title (page_title), idx_redirect (page_is_redirect), idx_min_level (min_level), idx_leaf (is_leaf)
+- is_leaf → TRUE for articles (page.page_namespace 0), FALSE for categories (namespace 14)
+- Indexes: PRIMARY KEY (page_id), idx_title (page_title), idx_level (min_level), idx_leaf (is_leaf)
 
 
 bstem_redirect
