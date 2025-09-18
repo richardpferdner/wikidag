@@ -116,15 +116,15 @@ bstem_lexical_link: Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
 | Field          | Type             | Null | Key | Default |
 +----------------+------------------+------+-----+---------+
-| rd_from_title  | varbinary(255)   | NO   | MUL |         |
-| rd_to_page_id  | int(8) unsigned  | NO   | PRI | 0       |
-| rd_to_fragment | varbinary(255)   | YES  |     | NULL    |
+| ll_from_title  | varbinary(255)   | NO   | MUL |         |
+| ll_to_page_id  | int(8) unsigned  | NO   | PRI | 0       |
+| ll_to_fragment | varbinary(255)   | YES  |     | NULL    |
 +----------------+------------------+------+-----+---------+
 Notes:
-- from_title: string from the enwiki rd_from's page.page_title
+- ll_from_title: string from the enwiki rd_from's page.page_title
  - this is the lexical/sematic string to match on for redirect
-- to_page_id: page to redirect to
-- to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
+- ll_to_page_id: page to redirect to
+- ll_to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
 bstem_associative_link: Associative links (conceptual relationships between pages)
 +----------------+------------------------------------------+------+-----+---------+
@@ -142,17 +142,6 @@ Notes:
   - 'categorylink': Relationship from categorylinks table (category membership)
   - 'both': Relationship exists in both pagelinks and categorylinks
 
-bstem_pagelink: Associative links (the concepts on this page connects to that page)
-+-------------------+-----------------+------+-----+---------+
-| Field             | Type            | Null | Key | Default | 
-+-------------------+-----------------+------+-----+---------+
-| pl_from_page_id   | int unsigned    | NO   | PRI | 0       |
-| pl_to_page_id     | int unsigned    | NO   | PRI | NULL    |
-+-------------------+-----------------+------+-----+---------+
-High value:
-- pl_from: page.page_id of page the link is coming from
-- pl_target_id - page.page_id of page linked going to 
-
 bstem_roots: Root category mapping
 +----------+--------------+------+-----+---------+
 | Field    | Type         | Null | Key | Default |
@@ -164,18 +153,6 @@ bstem_roots: Root category mapping
 Notes:
 - Maps BSTEM root categories to IDs (1=Business, 2=Science, 3=Technology, 4=Engineering, 5=Mathematics)
 - Used for efficient root_id lookups in bstem_page
-
-build_state: Build process state tracking
-+------------+----------+------+-----+---------+
-| Field      | Type     | Null | Key | Default |
-+------------+----------+------+-----+---------+
-| state_key  | varchar(50) | NO | PRI |         |
-| state_value| text     | YES  |     | NULL    |
-| updated_at | timestamp| NO   |     | CURRENT_TIMESTAMP |
-+------------+----------+------+-----+---------+
-Notes:
-- Tracks build progress for mid-level restart capability
-- Key states: 'last_completed_level', 'last_attempted_level', 'total_pages'
 
 bstem_cycles: Cycle detection results
 +-------------+--------------+------+-----+---------+
