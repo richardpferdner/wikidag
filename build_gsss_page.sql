@@ -111,7 +111,7 @@ BEGIN
   IF p_end_level IS NULL THEN SET p_end_level = 12; END IF;
   IF p_batch_size IS NULL THEN SET p_batch_size = 50000; END IF;
 
-  SET v_start_time = UNIX_TIMESTAMP(3);
+  SET v_start_time = UNIX_TIMESTAMP();
   SET v_current_level = p_begin_level;
   
   -- Clear working table
@@ -196,7 +196,7 @@ BEGIN
     v_current_level - 1 AS actual_end_level,
     v_total_new_pages AS new_pages_added,
     (SELECT COUNT(*) FROM gsss_page) AS total_pages_now,
-    ROUND(UNIX_TIMESTAMP(3) - v_start_time, 2) AS total_execution_time_sec;
+    ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_execution_time_sec;
 
 END//
 
