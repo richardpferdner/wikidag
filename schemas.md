@@ -56,6 +56,12 @@ pagelinks: 1,586,173,596 rows
 | pl_from_namespace | int             | NO   | MUL | 0       |
 | pl_target_id      | bigint unsigned | NO   | PRI | NULL    |
 +-------------------+-----------------+------+-----+---------+
+Notes:
+- pl_from: page.page_id of page the link is coming from
+- pl_from_namespace:
+ - 0 = article
+ - 14 = category
+- pl_target_id - page.page_id of page linked going to 
 
 redirect: 14,843,089 rows
 +---------------+------------------+------+-----+---------+
