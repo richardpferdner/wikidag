@@ -1,7 +1,7 @@
 # Wikipedia Category Tree Builder
 
 ## Overview
-Extract and materialize a DAG tree of Wikipedia categories and articles for Science, Social Sciences, and Geography (GSSS) domainsfrom existing Wikipedia database dumps across three phases.
+Extract and materialize a DAG tree of Wikipedia categories and articles for Geography, Science, and Social Sciences (GSSS) domainsfrom existing Wikipedia database dumps across three phases.
 
 ## Problem Statement
 - Need efficient access to GSSS subset of Wikipedia's 63M pages
