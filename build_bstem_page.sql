@@ -81,7 +81,7 @@ SELECT 5, 'Mathematics', page_id FROM page WHERE page_namespace = 14 AND page_ti
 -- ========================================
 
 DROP PROCEDURE IF EXISTS GetBuildLevelRange;
-DELIMITER $$
+DELIMITER $
 CREATE PROCEDURE GetBuildLevelRange(
   IN p_begin_level INT,
   IN p_end_level INT,
@@ -91,30 +91,75 @@ CREATE PROCEDURE GetBuildLevelRange(
 )
 BEGIN
   DECLARE v_max_existing_level INT DEFAULT -1;
-  DECLARE v_min_existing_level INT DEFAULT 999;
+  DECLARE v_interrupted_level INT DEFAULT -1;
   
   -- Check what levels already exist
-  SELECT COALESCE(MIN(page_dag_level), 999), COALESCE(MAX(page_dag_level), -1)
-  INTO v_min_existing_level, v_max_existing_level
+  SELECT COALESCE(MAX(page_dag_level), -1)
+  INTO v_max_existing_level
   FROM bstem_page;
+  
+  -- Check for interrupted build
+  SELECT COALESCE(state_value, -1) INTO v_interrupted_level
+  FROM build_state 
+  WHERE state_key = 'last_attempted_level';
   
   SET v_has_existing_data = (v_max_existing_level >= 0);
   
   IF v_has_existing_data THEN
-    -- For incremental builds, validate range
+    -- For incremental/restart builds
     SET v_actual_begin = GREATEST(p_begin_level, 0);
     SET v_actual_end = p_end_level;
     
-    -- If begin_level is within existing data, start from next level
-    IF p_begin_level <= v_max_existing_level THEN
+    -- If resuming from interruption, start from interrupted level
+    IF v_interrupted_level > v_max_existing_level THEN
+      SET v_actual_begin = v_interrupted_level;
+    ELSEIF p_begin_level <= v_max_existing_level THEN
       SET v_actual_begin = v_max_existing_level + 1;
     END IF;
   ELSE
-    -- Fresh build - start from level 0
+    -- Fresh build
     SET v_actual_begin = 0;
     SET v_actual_end = p_end_level;
   END IF;
-END$$
+END$
+DELIMITER ;
+
+-- Cycle detection procedure
+DROP PROCEDURE IF EXISTS DetectCycles;
+DELIMITER $
+CREATE PROCEDURE DetectCycles(IN p_max_depth INT DEFAULT 10)
+BEGIN
+  TRUNCATE TABLE bstem_cycles;
+  
+  -- Find potential cycles using recursive path checking
+  INSERT INTO bstem_cycles (page_id, ancestor_id, path_length)
+  WITH RECURSIVE cycle_check (page_id, ancestor_id, path_length) AS (
+    -- Base case: direct parent relationships
+    SELECT page_id, page_parent_id, 1
+    FROM bstem_page 
+    WHERE page_parent_id > 0
+    
+    UNION ALL
+    
+    -- Recursive case: follow parent chain
+    SELECT cc.page_id, bp.page_parent_id, cc.path_length + 1
+    FROM cycle_check cc
+    JOIN bstem_page bp ON cc.ancestor_id = bp.page_id
+    WHERE bp.page_parent_id > 0 
+      AND cc.path_length < p_max_depth
+      AND bp.page_parent_id != cc.page_id  -- Detect immediate cycle
+  )
+  SELECT page_id, ancestor_id, path_length
+  FROM cycle_check
+  WHERE page_id = ancestor_id  -- Cycle detected
+    AND path_length > 1;
+  
+  -- Report results
+  SELECT 
+    COUNT(*) AS cycles_detected,
+    AVG(path_length) AS avg_cycle_length
+  FROM bstem_cycles;
+END$
 DELIMITER ;
 
 -- ========================================
@@ -143,6 +188,11 @@ BEGIN
   
   DECLARE EXIT HANDLER FOR SQLEXCEPTION
   BEGIN
+    -- Save interrupted level for restart
+    INSERT INTO build_state (state_key, state_value) 
+    VALUES ('last_attempted_level', v_current_level)
+    ON DUPLICATE KEY UPDATE state_value = v_current_level;
+    
     ROLLBACK;
     RESIGNAL;
   END;
@@ -152,8 +202,13 @@ BEGIN
   -- Determine actual level range
   CALL GetBuildLevelRange(p_begin_level, p_end_level, v_actual_begin, v_actual_end, v_has_existing_data);
   
-  -- Clear working table
+  -- Clear working table and update build state
   TRUNCATE TABLE bstem_work;
+  
+  -- Track build attempt
+  INSERT INTO build_state (state_key, state_value) 
+  VALUES ('last_attempted_level', v_actual_begin)
+  ON DUPLICATE KEY UPDATE state_value = v_actual_begin;
   
   -- ========================================
   -- STEP 1: Initialize seed data
@@ -207,6 +262,11 @@ BEGIN
   WHILE v_current_level <= v_actual_end AND v_continue DO
     SET v_level_start_time = UNIX_TIMESTAMP(3);
     
+    -- Track current level attempt
+    INSERT INTO build_state (state_key, state_value) 
+    VALUES ('last_attempted_level', v_current_level)
+    ON DUPLICATE KEY UPDATE state_value = v_current_level;
+    
     START TRANSACTION;
     
     -- Create temporary table for this level's results
@@ -217,7 +277,7 @@ BEGIN
       PRIMARY KEY (page_id, parent_id, root_id)
     ) ENGINE=MEMORY;
     
-    -- Find children of current level parents, batch by batch
+    -- Find children of current level parents, explicitly exclude files
     INSERT INTO level_candidates (page_id, parent_id, root_id)
     SELECT DISTINCT
       cl.cl_from,
@@ -227,8 +287,9 @@ BEGIN
     INNER JOIN categorylinks cl ON w.page_id = cl.cl_target_id
     INNER JOIN page p ON cl.cl_from = p.page_id
     WHERE w.level = (CASE WHEN v_current_level = 0 THEN 0 ELSE v_current_level - 1 END)
-      AND cl.cl_type IN ('page', 'subcat')
-      AND p.page_namespace IN (0, 14)
+      AND cl.cl_type IN ('page', 'subcat')  -- Include pages and subcategories
+      AND cl.cl_type != 'file'              -- Explicitly exclude files
+      AND p.page_namespace IN (0, 14)       -- Articles and categories only
       -- Exclude pages already in bstem_page
       AND NOT EXISTS (
         SELECT 1 FROM bstem_page bp WHERE bp.page_id = cl.cl_from
@@ -288,6 +349,25 @@ END$
 DELIMITER ;
 
 -- ========================================
+-- UTILITY PROCEDURES
+-- ========================================
+
+-- Resume build from last completed level
+DROP PROCEDURE IF EXISTS ResumeBuild;
+DELIMITER $
+CREATE PROCEDURE ResumeBuild(IN p_target_level INT DEFAULT 12)
+BEGIN
+  DECLARE v_last_level INT DEFAULT -1;
+  
+  SELECT COALESCE(state_value, -1) INTO v_last_level
+  FROM build_state 
+  WHERE state_key = 'last_completed_level';
+  
+  CALL BuildBSTEMPageTree(v_last_level + 1, p_target_level);
+END$
+DELIMITER ;
+
+-- ========================================
 -- EXAMPLE USAGE
 -- ========================================
 
@@ -297,4 +377,11 @@ CALL BuildBSTEMPageTree(0, 5);
 
 -- Continue building (levels 6-10):  
 CALL BuildBSTEMPageTree(6, 10);
+
+-- Resume from last completed level:
+CALL ResumeBuild(12);
+
+-- Check for cycles:
+CALL DetectCycles(15);
+SELECT * FROM bstem_cycles;
 */
