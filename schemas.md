@@ -86,14 +86,15 @@ High value:
 - rd_namespace: target page's type
  - 0 = article
  - 14 = category
-- rd_title: string of target page title, should match target's page_title
+- rd_title: string of target page title
+ - this is the string used to match the target's page_title to find the page_id
 - rd_interwiki: if not null, it is an external link (exclude)
-- rd_fragment: if not null, a string containing the section in the page (e.g. History)
+- rd_fragment: if not null, a string containing the section in the page (e.g., "History")
 Notes:
 
 == New tables in this project ==
 
-bstem_node
+bstem_page
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
 +----------------+------------------+------+-----+--------------+
@@ -101,13 +102,13 @@ bstem_node
 | page_title     | varchar(255)     | NO   | MUL |              |
 | parent_page_id | int              | NO   | PRI | NULL         |
 | root_page_id   | int              | NO   | PRI | NULL         |
-| level          | int              | NO   | MUL | NULL         |
+| dag_level      | int              | NO   | MUL | NULL         |
 | is_leaf        | tinyint(1)       | NO   | MUL | 0            |
 +----------------+------------------+------+-----+--------------+
 
 Notes:
 - Materialized DAG tree of BSTEM (Business, Science, Technology, Engineering, Mathematics) categories and articles
-- level → depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
+- dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
 - is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - root_category → which of the 5 main BSTEM domains this page belongs to
 - Indexes: PRIMARY KEY (page_id), idx_root_level (root_category, level), idx_level_leaf (level, is_leaf), idx_namespace (page_namespace), UNIQUE KEY uk_page_root (page_id, root_category)
@@ -116,11 +117,18 @@ Notes:
 
 
 bstem_redirect
-+--------------------+------------------+------+-----+-------------------+
-| Field              | Type             | Null | Key | Default           |
-+--------------------+------------------+------+-----+-------------------+
-+--------------------+------------------+------+-----+-------------------+
-
++---------------+------------------+------+-----+---------+
+| Field         | Type             | Null | Key | Default |
++---------------+------------------+------+-----+---------+
+| from_title    | varbinary(255)   | NO   | MUL |         |
+| to_page_id    | int(8) unsigned  | NO   | PRI | 0       |
+| to_fragment   | varbinary(255)   | YES  |     | NULL    |
++---------------+------------------+------+-----+---------+
+Notes:
+- from_title: string from the enwiki rd_from's page.page_title
+ - this is the lexical/sematic string to match on for redirect
+- to_page_id: page to redirect to
+- to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
 bstem_pagelink
 +--------------------+------------------+------+-----+-------------------+
