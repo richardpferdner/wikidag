@@ -18,13 +18,13 @@ categorylinks: 208,756,116 rows
 +-------------------+------------------------------+------+-----+
 High value: 
 - cl_from - page.page_id of page in category
-- cl_type - 0 = page (page_namespace 0), subcat = subcategory (page_namespace 14)
 - cl_target_id - page.page_id of category 
+
+Notes:
 - cl_to - string of category, should match category's page_title
 - cl_type → what kind of page cl_from is. 
   - cl_type refers to the thing being categorized, i.e. the page identified by cl_from, not the category (cl_to)
-Notes:
-
+  
 page: 63,942,562 rows
 +--------------------+------------------+------+-----+---------+
 | Field              | Type             | Null | Key | Default | 
@@ -43,11 +43,16 @@ page: 63,942,562 rows
 | page_lang          | varbinary(35)    | YES  |     | NULL    |
 +--------------------+------------------+------+-----+---------+
 High value:
+- page_id
+- page_title
 - page_namespace:
  - 0 = article
  - 14 = category
 - page_content_model
  - 'wikitext' - most articles
+- page_is_redirect: Boolean flag indicating if this page redirects to another page:
+ - 1 = Redirect page (has entry in redirect table)
+ - 0 = Normal content page
 Notes:
 
 pagelinks: 1,586,173,596 rows
@@ -60,12 +65,12 @@ pagelinks: 1,586,173,596 rows
 +-------------------+-----------------+------+-----+---------+
 High value:
 - pl_from: page.page_id of page the link is coming from
+- pl_target_id - page.page_id of page linked going to 
+Notes:
 - pl_from_namespace:
  - 0 = article
  - 14 = category
-- pl_target_id - page.page_id of page linked going to 
-Notes:
-
+   
 redirect: 14,843,089 rows
 +---------------+------------------+------+-----+---------+
 | Field         | Type             | Null | Key | Default |
