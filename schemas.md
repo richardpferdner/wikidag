@@ -111,7 +111,6 @@ Notes:
 - page_dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - page_root_id → which of the 5 main BSTEM domains this page belongs to
-- Indexes: PRIMARY KEY (page_id), idx_root_level (page_root_id, page_dag_level), idx_level_leaf (page_dag_level, page_is_leaf), UNIQUE KEY uk_page_root (page_id, page_root_id)
 
 
 bstem_redirect: Lexical links (this string connects to that page)
