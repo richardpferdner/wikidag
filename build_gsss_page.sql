@@ -68,13 +68,13 @@ CREATE TABLE IF NOT EXISTS gsss_cycles (
 -- ========================================
 
 -- Critical indexes for fast traversal
-CREATE INDEX IF NOT EXISTS idx_cl_target_type ON categorylinks (cl_target_id, cl_type);
-CREATE INDEX IF NOT EXISTS idx_cl_from ON categorylinks (cl_from);
-CREATE INDEX IF NOT EXISTS idx_cl_type_target ON categorylinks (cl_type, cl_target_id);
+CREATE INDEX idx_cl_target_type ON categorylinks (cl_target_id, cl_type);
+CREATE INDEX idx_cl_from ON categorylinks (cl_from);
+CREATE INDEX idx_cl_type_target ON categorylinks (cl_type, cl_target_id);
 
 -- Page table optimizations
-CREATE INDEX IF NOT EXISTS idx_page_ns_title ON page (page_namespace, page_title);
-CREATE INDEX IF NOT EXISTS idx_page_id_ns ON page (page_id, page_namespace);
+CREATE INDEX idx_page_ns_title ON page (page_namespace, page_title);
+CREATE INDEX idx_page_id_ns ON page (page_id, page_namespace);
 
 -- ========================================
 -- INITIALIZATION
@@ -148,8 +148,12 @@ DROP PROCEDURE IF EXISTS DetectCycles;
 
 DELIMITER //
 
-CREATE PROCEDURE DetectCycles(IN p_max_depth INT DEFAULT 10)
+CREATE PROCEDURE DetectCycles(IN p_max_depth INT)
 BEGIN
+  IF p_max_depth IS NULL THEN
+    SET p_max_depth = 10;
+  END IF;
+  
   TRUNCATE TABLE gsss_cycles;
   
   -- Find potential cycles using recursive path checking
@@ -193,9 +197,9 @@ DROP PROCEDURE IF EXISTS BuildGSSSPageTree;
 DELIMITER //
 
 CREATE PROCEDURE BuildGSSSPageTree(
-  IN p_begin_level INT DEFAULT 0,
-  IN p_end_level INT DEFAULT 12,
-  IN p_batch_size INT DEFAULT 50000
+  IN p_begin_level INT,
+  IN p_end_level INT,
+  IN p_batch_size INT
 )
 BEGIN
   DECLARE v_current_level INT;
@@ -208,6 +212,11 @@ BEGIN
   DECLARE v_level_start_time DECIMAL(14,3);
   DECLARE v_continue BOOLEAN DEFAULT TRUE;
   DECLARE v_parent_pages INT DEFAULT 0;
+  
+  -- Set defaults
+  IF p_begin_level IS NULL THEN SET p_begin_level = 0; END IF;
+  IF p_end_level IS NULL THEN SET p_end_level = 12; END IF;
+  IF p_batch_size IS NULL THEN SET p_batch_size = 50000; END IF;
   
   DECLARE EXIT HANDLER FOR SQLEXCEPTION
   BEGIN
@@ -385,15 +394,17 @@ DROP PROCEDURE IF EXISTS ResumeBuild;
 
 DELIMITER //
 
-CREATE PROCEDURE ResumeBuild(IN p_target_level INT DEFAULT 12)
+CREATE PROCEDURE ResumeBuild(IN p_target_level INT)
 BEGIN
   DECLARE v_last_level INT DEFAULT -1;
+  
+  IF p_target_level IS NULL THEN SET p_target_level = 12; END IF;
   
   SELECT COALESCE(state_value, -1) INTO v_last_level
   FROM build_state 
   WHERE state_key = 'last_completed_level';
   
-  CALL BuildGSSSPageTree(v_last_level + 1, p_target_level);
+  CALL BuildGSSSPageTree(v_last_level + 1, p_target_level, NULL);
 END//
 
 DELIMITER ;
@@ -404,10 +415,10 @@ DELIMITER ;
 
 /*
 -- Initial build (levels 0-5):
-CALL BuildGSSSPageTree(0, 5);
+CALL BuildGSSSPageTree(0, 5, NULL);
 
 -- Continue building (levels 6-10):  
-CALL BuildGSSSPageTree(6, 10);
+CALL BuildGSSSPageTree(6, 10, NULL);
 
 -- Resume from last completed level:
 CALL ResumeBuild(12);
