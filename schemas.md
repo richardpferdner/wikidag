@@ -74,12 +74,13 @@ redirect: 14,843,089 rows
 | rd_fragment   | varbinary(255)   | YES  |     | NULL    |
 +---------------+------------------+------+-----+---------+
 Notes:
-- rd_from → page_id of the redirect page
-- rd_namespace, rd_title → target page location
-- rd_interwiki → for interwiki redirects (usually empty for local redirects)
-- rd_fragment → for redirects to page sections (usually empty)
-- Maps redirect sources to their destinations
-
+- rd_from: page_id of the redirect page
+- rd_namespace: target page's type
+ - 0 = article
+ - 14 = category
+- rd_title: string of target page title, should match target's page_title
+- rd_interwiki: if not null, it is an external link (exclude)
+- rd_fragment: if not null, a string containing the section in the page (e.g. History)
 
 == New tables in this project ==
 
