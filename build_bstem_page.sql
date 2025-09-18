@@ -45,37 +45,7 @@ CREATE TABLE IF NOT EXISTS bstem_roots (
   INDEX idx_page_id (page_id)
 ) ENGINE=InnoDB;
 
--- Progress tracking table
-CREATE TABLE IF NOT EXISTS build_progress (
-  iteration INT AUTO_INCREMENT PRIMARY KEY,
-  begin_level INT,
-  end_level INT,
-  level INT,
-  root_category VARCHAR(255),
-  pages_added INT,
-  execution_time_sec DECIMAL(10,3),
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_timestamp (timestamp),
-  INDEX idx_levels (begin_level, end_level)
-) ENGINE=InnoDB;
 
--- Build state tracking
-CREATE TABLE IF NOT EXISTS build_state (
-  state_key VARCHAR(50) PRIMARY KEY,
-  state_value TEXT,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-
--- Error logging table
-CREATE TABLE IF NOT EXISTS build_errors (
-  error_id INT AUTO_INCREMENT PRIMARY KEY,
-  begin_level INT,
-  end_level INT,
-  level INT,
-  error_message TEXT,
-  sql_state VARCHAR(5),
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
 
 -- ========================================
 -- PERFORMANCE INDEXES ON SOURCE TABLES
@@ -173,13 +143,6 @@ BEGIN
   
   DECLARE EXIT HANDLER FOR SQLEXCEPTION
   BEGIN
-    GET DIAGNOSTICS CONDITION 1
-      @error_message = MESSAGE_TEXT,
-      @sql_state = RETURNED_SQLSTATE;
-    
-    INSERT INTO build_errors (begin_level, end_level, level, error_message, sql_state)
-    VALUES (p_begin_level, p_end_level, v_current_level, @error_message, @sql_state);
-    
     ROLLBACK;
     RESIGNAL;
   END;
@@ -191,10 +154,6 @@ BEGIN
   
   -- Clear working table
   TRUNCATE TABLE bstem_work;
-  
-  -- Log build start
-  INSERT INTO build_progress (begin_level, end_level, level, root_category, pages_added, execution_time_sec)
-  VALUES (p_begin_level, p_end_level, -1, 'BUILD_START', 0, 0);
   
   -- ========================================
   -- STEP 1: Initialize seed data
@@ -238,11 +197,6 @@ BEGIN
   END IF;
   
   COMMIT;
-  
-  -- Log initialization
-  INSERT INTO build_progress (begin_level, end_level, level, root_category, pages_added, execution_time_sec)
-  VALUES (p_begin_level, p_end_level, v_actual_begin, 'INITIALIZATION', v_parent_pages, 
-          UNIX_TIMESTAMP(3) - v_level_start_time);
   
   -- ========================================
   -- STEP 2: Level-by-level traversal
@@ -307,11 +261,6 @@ BEGIN
     
     DROP TEMPORARY TABLE level_candidates;
     
-    -- Log level progress
-    INSERT INTO build_progress (begin_level, end_level, level, root_category, pages_added, execution_time_sec)
-    VALUES (p_begin_level, p_end_level, v_current_level, 'ALL', v_rows_added, 
-            UNIX_TIMESTAMP(3) - v_level_start_time);
-    
     COMMIT;
     
     -- Check continuation condition
@@ -323,22 +272,6 @@ BEGIN
     
   END WHILE;
   
-  -- ========================================
-  -- STEP 3: Update build state
-  -- ========================================
-  
-  INSERT INTO build_state (state_key, state_value) 
-  VALUES ('last_completed_level', v_current_level - 1)
-  ON DUPLICATE KEY UPDATE state_value = v_current_level - 1;
-  
-  INSERT INTO build_state (state_key, state_value)
-  VALUES ('total_pages', (SELECT COUNT(*) FROM bstem_page))
-  ON DUPLICATE KEY UPDATE state_value = (SELECT COUNT(*) FROM bstem_page);
-  
-  -- Final summary
-  INSERT INTO build_progress (begin_level, end_level, level, root_category, pages_added, execution_time_sec)
-  VALUES (p_begin_level, p_end_level, -2, 'BUILD_COMPLETE', v_total_new_pages, 
-          UNIX_TIMESTAMP(3) - v_start_time);
   
   -- Report results
   SELECT 
@@ -351,97 +284,7 @@ BEGIN
     (SELECT COUNT(*) FROM bstem_page) AS total_pages_now,
     ROUND(UNIX_TIMESTAMP(3) - v_start_time, 2) AS total_execution_time_sec;
 
-END$$
-DELIMITER ;
-
--- ========================================
--- MONITORING VIEWS
--- ========================================
-
--- Current build state
-CREATE OR REPLACE VIEW build_status AS
-SELECT 
-  bs1.state_value AS last_completed_level,
-  bs2.state_value AS total_pages,
-  (SELECT MAX(page_dag_level) FROM bstem_page) AS current_max_level,
-  (SELECT MIN(page_dag_level) FROM bstem_page) AS current_min_level,
-  (SELECT COUNT(DISTINCT page_root_id) FROM bstem_page) AS root_domains
-FROM build_state bs1
-LEFT JOIN build_state bs2 ON bs2.state_key = 'total_pages'
-WHERE bs1.state_key = 'last_completed_level';
-
--- Summary by root category  
-CREATE OR REPLACE VIEW bstem_summary AS
-SELECT 
-  br.root_name AS root_category,
-  COUNT(*) AS total_pages,
-  SUM(CASE WHEN bp.page_is_leaf = TRUE THEN 1 ELSE 0 END) AS articles,
-  SUM(CASE WHEN bp.page_is_leaf = FALSE THEN 1 ELSE 0 END) AS categories,
-  MIN(bp.page_dag_level) AS min_depth,
-  MAX(bp.page_dag_level) AS max_depth
-FROM bstem_page bp
-JOIN bstem_roots br ON bp.page_root_id = br.root_id
-GROUP BY bp.page_root_id, br.root_name
-ORDER BY total_pages DESC;
-
--- Level distribution
-CREATE OR REPLACE VIEW bstem_level_distribution AS
-SELECT 
-  page_dag_level AS level,
-  COUNT(*) AS page_count,
-  SUM(CASE WHEN page_is_leaf = TRUE THEN 1 ELSE 0 END) AS articles,
-  SUM(CASE WHEN page_is_leaf = FALSE THEN 1 ELSE 0 END) AS categories
-FROM bstem_page
-GROUP BY page_dag_level
-ORDER BY page_dag_level;
-
--- Recent build performance
-CREATE OR REPLACE VIEW build_performance AS
-SELECT 
-  begin_level,
-  end_level,
-  level,
-  pages_added,
-  execution_time_sec,
-  CASE 
-    WHEN execution_time_sec > 0 THEN ROUND(pages_added / execution_time_sec, 0)
-    ELSE NULL 
-  END AS pages_per_sec,
-  timestamp
-FROM build_progress
-WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-ORDER BY timestamp DESC;
-
--- ========================================
--- UTILITY PROCEDURES
--- ========================================
-
--- Quick status check
-DROP PROCEDURE IF EXISTS CheckBuildStatus;
-DELIMITER $$
-CREATE PROCEDURE CheckBuildStatus()
-BEGIN
-  SELECT * FROM build_status;
-  SELECT 'Recent Performance' AS section;
-  SELECT * FROM build_performance LIMIT 10;
-  SELECT 'Level Distribution' AS section;
-  SELECT * FROM bstem_level_distribution;
-END$$
-DELIMITER ;
-
--- Resume build from last completed level
-DROP PROCEDURE IF EXISTS ResumeBuild;
-DELIMITER $$
-CREATE PROCEDURE ResumeBuild(IN p_target_level INT DEFAULT 12)
-BEGIN
-  DECLARE v_last_level INT DEFAULT -1;
-  
-  SELECT COALESCE(state_value, -1) INTO v_last_level
-  FROM build_state 
-  WHERE state_key = 'last_completed_level';
-  
-  CALL BuildBSTEMPageTree(v_last_level + 1, p_target_level);
-END$$
+END$
 DELIMITER ;
 
 -- ========================================
@@ -454,14 +297,4 @@ CALL BuildBSTEMPageTree(0, 5);
 
 -- Continue building (levels 6-10):  
 CALL BuildBSTEMPageTree(6, 10);
-
--- Resume from last completed level:
-CALL ResumeBuild(12);
-
--- Check current status:
-CALL CheckBuildStatus();
-
--- View summaries:
-SELECT * FROM bstem_summary;
-SELECT * FROM bstem_level_distribution;
 */
