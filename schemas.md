@@ -67,7 +67,7 @@ Notes:
 
 == New tables in this project ==
 
-bstem_categoryl_dag
+bstem_category_dag
 +----------------+-------------+------+-----+-------------------+
 | Field          | Type        | Null | Key | Default           |
 +----------------+-------------+------+-----+-------------------+
