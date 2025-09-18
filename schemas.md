@@ -94,7 +94,7 @@ Notes:
 
 == New tables in this project ==
 
-bstem_page: DAG tree of category pages with article pages as leaves
+gsss_page: DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
 +----------------+------------------+------+-----+--------------+
@@ -107,12 +107,12 @@ bstem_page: DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 
 Notes:
-- Materialized DAG tree of BSTEM (Business, Science, Technology, Engineering, Mathematics) categories and articles
+- Materialized DAG tree of GSSS (Business, Science, Technology, Engineering, Mathematics) categories and articles
 - page_dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
-- page_root_id → which of the 5 main BSTEM domains this page belongs to
+- page_root_id → which of the 5 main GSSS domains this page belongs to
 
-bstem_lexical_link: Lexical links (this string connects to that page)
+gsss_lexical_link: Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
 | Field          | Type             | Null | Key | Default |
 +----------------+------------------+------+-----+---------+
@@ -126,7 +126,7 @@ Notes:
 - ll_to_page_id: page to redirect to
 - ll_to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
-bstem_associative_link: Associative links (conceptual relationships between pages)
+gsss_associative_link: Associative links (conceptual relationships between pages)
 +----------------+------------------------------------------+------+-----+---------+
 | Field          | Type                                     | Null | Key | Default |
 +----------------+------------------------------------------+------+-----+---------+
@@ -142,7 +142,7 @@ Notes:
   - 'categorylink': Relationship from categorylinks table (category membership)
   - 'both': Relationship exists in both pagelinks and categorylinks
 
-bstem_roots: Root category mapping
+gsss_roots: Root category mapping
 +----------+--------------+------+-----+---------+
 | Field    | Type         | Null | Key | Default |
 +----------+--------------+------+-----+---------+
@@ -151,10 +151,10 @@ bstem_roots: Root category mapping
 | page_id  | int unsigned | NO   | MUL | NULL    |
 +----------+--------------+------+-----+---------+
 Notes:
-- Maps BSTEM root categories to IDs (1=Business, 2=Science, 3=Technology, 4=Engineering, 5=Mathematics)
-- Used for efficient root_id lookups in bstem_page
+- Maps GSSS root categories to IDs (1=Business, 2=Science, 3=Technology, 4=Engineering, 5=Mathematics)
+- Used for efficient root_id lookups in gsss_page
 
-bstem_cycles: Cycle detection results
+gsss_cycles: Cycle detection results
 +-------------+--------------+------+-----+---------+
 | Field       | Type         | Null | Key | Default |
 +-------------+--------------+------+-----+---------+
