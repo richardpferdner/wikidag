@@ -74,8 +74,8 @@ bstem_category
 | page_id        | int         | NO   | PRI | NULL              |
 | page_title     | varchar(255)| NO   |     |                   |
 | page_namespace | int         | NO   | MUL | NULL              |
+| root_page_id   | int         | NO   | PRI | NULL              |
 | level          | int         | NO   | MUL | NULL              |
-| root_category  | varchar(255)| NO   | MUL | NULL              |
 | is_leaf        | tinyint(1)  | NO   | MUL | 0                 |
 | created_at     | timestamp   | YES  |     | CURRENT_TIMESTAMP |
 +----------------+-------------+------+-----+-------------------+
