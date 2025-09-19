@@ -94,7 +94,8 @@ Notes:
 
 == New tables in this project ==
 
-gsss_page: DAG tree of category pages with article pages as leaves
+gsss_page: 15,119,748 rows
+DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
 +----------------+------------------+------+-----+--------------+
