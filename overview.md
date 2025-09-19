@@ -56,9 +56,8 @@ sass_page: 9,392,822 rows
   - ll_from_title: lexical/semantic string from redirect page title
   - ll_to_page_id: target page_id in sass_page
   - ll_to_fragment: optional section anchor within target page
-- Two implementation approaches:
-  - Simple Single-Hop: direct JOIN (85-90% coverage, 2-5 minutes)
-  - Comprehensive Chain Resolution: recursive CTE (95-98% coverage, 8-15 minutes)
+- Use Comprehensive Chain Resolution: recursive CTE
+- Similar to build_sass_page.sql, display results after each level is completed
 
 ### Phase 3: Build Associative Link Network
 - Source tables: pagelinks, categorylinks → sass_associative_link
@@ -67,7 +66,7 @@ sass_page: 9,392,822 rows
   - al_from_page_id: source page ID
   - al_to_page_id: target page ID
   - al_type: relationship origin ('pagelink', 'categorylink', 'both')
-
 - Only include links where both source and target exist in sass_page
 - Exclude self-links
 - Maintains link relationships within SASS knowledge domain
+- Similar to build_sass_page.sql, display results after each level is completed
