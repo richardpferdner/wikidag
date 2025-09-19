@@ -91,23 +91,22 @@ WHERE page_namespace = 14
   AND CONVERT(page_title, CHAR) IN ('Geography', 'Science', 'Social_sciences');
 */
 
--- Step 2: Initialize root category mapping with binary literals (update after Step 1)
--- TODO: Replace these with actual binary values found above
+-- Step 2: Initialize root category mapping with binary literals
 INSERT IGNORE INTO gsss_roots (root_id, root_name, page_id)
 SELECT 1, 'Geography', page_id FROM page 
 WHERE page_namespace = 14 
   AND page_content_model = 'wikitext' 
-  AND page_title = 'Geography'
+  AND page_title = 0x47656F677261706879
 UNION ALL
 SELECT 2, 'Science', page_id FROM page 
 WHERE page_namespace = 14 
   AND page_content_model = 'wikitext'
-  AND page_title = 'Science'  
+  AND page_title = 0x536369656E6365
 UNION ALL
 SELECT 3, 'Social_sciences', page_id FROM page 
 WHERE page_namespace = 14 
   AND page_content_model = 'wikitext'
-  AND page_title = 'Social_sciences';
+  AND page_title = 0x536F6369616C5F736369656E636573;
 
 -- ========================================
 -- SIMPLIFIED BUILD PROCEDURE
