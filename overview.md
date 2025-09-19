@@ -55,20 +55,19 @@ sass_page: 9,392,822 rows
 - Create semantic equivalence mapping for alternative page titles
 - Enables lexical search by mapping redirects (e.g., "ML" → "Machine Learning") to canonical pages
 - Schema:
-  - ll_from_title: lexical/semantic string from redirect page title
-  - ll_to_page_id: target page_id in sass_page
-  - ll_to_fragment: optional section anchor within target page
+ - ll_from_title: lexical/semantic string from redirect page title
+ - ll_to_page_id: target page_id in sass_page
+ - ll_to_fragment: optional section anchor within target page
 - Use Comprehensive Chain Resolution: recursive CTE
 - Similar to build_sass_page.sql, display results after each level is completed
 
 ### Phase 3: Build Associative Link Network
 - Source tables: pagelinks, categorylinks → sass_associative_link
 - Create filtered link datasets for SASS associative link relationships
-- sass_associative_link: Unified relationship tracking with type classification
-  - al_from_page_id: source page ID
-  - al_to_page_id: target page ID
-  - al_type: relationship origin ('pagelink', 'categorylink', 'both')
-- Only include links where both source and target exist in sass_page
-- Exclude self-links
+- sass_associative_link: 
+ - al_from_page_id: source page ID
+ - al_to_page_id: target page ID
+ - al_type: relationship origin enum of ('pagelink', 'categorylink', 'both')
 - Maintains link relationships within SASS knowledge domain
+ - Only include links where both source and target: 1) each exist in one or more sass_page 2) but no link has the same page for both to and from (exclude self-links)
 - Similar to build_sass_page.sql, display results after each level is completed
