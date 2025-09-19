@@ -290,7 +290,7 @@ END//
 DELIMITER ;
 
 -- ========================================
--- OPTIMIZED BUILD PROCEDURE (LARGE DATASETS)
+-- BATCHED BUILD PROCEDURE WITH PROGRESS TRACKING
 -- ========================================
 
 DROP PROCEDURE IF EXISTS BuildSASSAssociativeLinksOptimized;
@@ -298,79 +298,219 @@ DROP PROCEDURE IF EXISTS BuildSASSAssociativeLinksOptimized;
 DELIMITER //
 
 CREATE PROCEDURE BuildSASSAssociativeLinksOptimized(
-  IN p_use_temp_tables TINYINT(1)
+  IN p_batch_size INT
 )
 BEGIN
   DECLARE v_start_time DECIMAL(14,3);
   DECLARE v_total_links INT DEFAULT 0;
+  DECLARE v_batch_links INT DEFAULT 0;
+  DECLARE v_current_batch INT DEFAULT 0;
+  DECLARE v_min_page_id INT DEFAULT 0;
+  DECLARE v_max_page_id INT DEFAULT 0;
+  DECLARE v_batch_start INT DEFAULT 0;
+  DECLARE v_batch_end INT DEFAULT 0;
+  DECLARE v_last_processed_id INT DEFAULT 0;
+  DECLARE v_continue TINYINT(1) DEFAULT 1;
+  DECLARE v_pagelinks_done INT DEFAULT 0;
+  DECLARE v_categorylinks_done INT DEFAULT 0;
   
-  IF p_use_temp_tables IS NULL THEN SET p_use_temp_tables = 1; END IF;
+  -- Set defaults
+  IF p_batch_size IS NULL THEN SET p_batch_size = 500000; END IF;
   
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Clear target table
-  TRUNCATE TABLE sass_associative_link;
+  -- Get page ID range for batching
+  SELECT MIN(page_id), MAX(page_id) INTO v_min_page_id, v_max_page_id FROM sass_page;
   
-  -- Direct approach: single query with union for all relationship types
-  INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
-  -- Pagelink-only relationships
-  SELECT DISTINCT
-    pl.pl_from as al_from_page_id,
-    pl.pl_target_id as al_to_page_id,
-    'pagelink' as al_type
-  FROM pagelinks pl
-  JOIN sass_page sp_from ON pl.pl_from = sp_from.page_id
-  JOIN sass_page sp_to ON pl.pl_target_id = sp_to.page_id
-  WHERE pl.pl_from != pl.pl_target_id
-    AND NOT EXISTS (
-      SELECT 1 FROM categorylinks cl2
-      WHERE cl2.cl_from = pl.pl_from 
-        AND cl2.cl_target_id = pl.pl_target_id
-        AND cl2.cl_type IN ('page', 'subcat')
-    )
+  -- Check for resume capability
+  SELECT COALESCE(state_value, 0) INTO v_last_processed_id 
+  FROM associative_build_state 
+  WHERE state_key = 'last_pagelink_batch_end';
   
-  UNION ALL
+  IF v_last_processed_id = 0 THEN
+    -- Fresh start - clear tables
+    TRUNCATE TABLE sass_associative_link;
+    
+    INSERT INTO associative_build_state (state_key, state_value, state_text) 
+    VALUES ('build_phase', 1, 'Processing pagelinks in batches')
+    ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Processing pagelinks in batches';
+  ELSE
+    -- Resume from last position
+    SELECT 'Resuming from last position' AS status, v_last_processed_id AS last_batch_end;
+  END IF;
   
-  -- Categorylink-only relationships
-  SELECT DISTINCT
-    cl.cl_from as al_from_page_id,
-    cl.cl_target_id as al_to_page_id,
-    'categorylink' as al_type
-  FROM categorylinks cl
-  JOIN sass_page sp_from ON cl.cl_from = sp_from.page_id
-  JOIN sass_page sp_to ON cl.cl_target_id = sp_to.page_id
-  WHERE cl.cl_from != cl.cl_target_id
-    AND cl.cl_type IN ('page', 'subcat')
-    AND NOT EXISTS (
-      SELECT 1 FROM pagelinks pl2
-      WHERE pl2.pl_from = cl.cl_from 
-        AND pl2.pl_target_id = cl.cl_target_id
-    )
+  -- ========================================
+  -- PHASE 1: BATCHED PAGELINKS PROCESSING
+  -- ========================================
   
-  UNION ALL
+  SET v_batch_start = GREATEST(v_min_page_id, v_last_processed_id);
   
-  -- Both relationships (pagelink + categorylink)
-  SELECT DISTINCT
-    pl.pl_from as al_from_page_id,
-    pl.pl_target_id as al_to_page_id,
-    'both' as al_type
-  FROM pagelinks pl
-  JOIN sass_page sp_from ON pl.pl_from = sp_from.page_id
-  JOIN sass_page sp_to ON pl.pl_target_id = sp_to.page_id
-  JOIN categorylinks cl ON pl.pl_from = cl.cl_from 
-    AND pl.pl_target_id = cl.cl_target_id
-  WHERE pl.pl_from != pl.pl_target_id
-    AND cl.cl_type IN ('page', 'subcat');
+  WHILE v_batch_start <= v_max_page_id AND v_continue = 1 DO
+    SET v_batch_end = LEAST(v_batch_start + p_batch_size - 1, v_max_page_id);
+    SET v_current_batch = v_current_batch + 1;
+    
+    -- Process pagelinks for current batch
+    INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
+    SELECT DISTINCT
+      pl.pl_from as al_from_page_id,
+      pl.pl_target_id as al_to_page_id,
+      'pagelink' as al_type
+    FROM pagelinks pl
+    JOIN sass_page sp_from ON pl.pl_from = sp_from.page_id
+    JOIN sass_page sp_to ON pl.pl_target_id = sp_to.page_id
+    WHERE pl.pl_from BETWEEN v_batch_start AND v_batch_end
+      AND pl.pl_from != pl.pl_target_id
+      AND NOT EXISTS (
+        SELECT 1 FROM categorylinks cl2
+        WHERE cl2.cl_from = pl.pl_from 
+          AND cl2.cl_target_id = pl.pl_target_id
+          AND cl2.cl_type IN ('page', 'subcat')
+      );
+    
+    SET v_batch_links = ROW_COUNT();
+    SET v_total_links = v_total_links + v_batch_links;
+    
+    -- Update progress
+    INSERT INTO associative_build_state (state_key, state_value) 
+    VALUES ('last_pagelink_batch_end', v_batch_end)
+    ON DUPLICATE KEY UPDATE state_value = v_batch_end;
+    
+    INSERT INTO associative_build_state (state_key, state_value) 
+    VALUES ('pagelinks_processed', v_total_links)
+    ON DUPLICATE KEY UPDATE state_value = v_total_links;
+    
+    -- Progress report every batch
+    SELECT 
+      CONCAT('Pagelinks Batch ', v_current_batch) AS status,
+      CONCAT(v_batch_start, ' - ', v_batch_end) AS page_range,
+      FORMAT(v_batch_links, 0) AS batch_links,
+      FORMAT(v_total_links, 0) AS total_links,
+      CONCAT(ROUND(100.0 * (v_batch_end - v_min_page_id) / (v_max_page_id - v_min_page_id), 1), '%') AS progress,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+    
+    SET v_batch_start = v_batch_end + 1;
+  END WHILE;
   
-  SET v_total_links = ROW_COUNT();
+  SET v_pagelinks_done = v_total_links;
   
-  -- Summary report
+  -- ========================================
+  -- PHASE 2: BATCHED CATEGORYLINKS PROCESSING
+  -- ========================================
+  
+  INSERT INTO associative_build_state (state_key, state_value, state_text) 
+  VALUES ('build_phase', 2, 'Processing categorylinks in batches')
+  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Processing categorylinks in batches';
+  
+  -- Reset for categorylinks
+  SET v_batch_start = v_min_page_id;
+  SET v_current_batch = 0;
+  
+  WHILE v_batch_start <= v_max_page_id DO
+    SET v_batch_end = LEAST(v_batch_start + p_batch_size - 1, v_max_page_id);
+    SET v_current_batch = v_current_batch + 1;
+    
+    -- Process categorylinks for current batch
+    INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
+    SELECT DISTINCT
+      cl.cl_from as al_from_page_id,
+      cl.cl_target_id as al_to_page_id,
+      'categorylink' as al_type
+    FROM categorylinks cl
+    JOIN sass_page sp_from ON cl.cl_from = sp_from.page_id
+    JOIN sass_page sp_to ON cl.cl_target_id = sp_to.page_id
+    WHERE cl.cl_from BETWEEN v_batch_start AND v_batch_end
+      AND cl.cl_from != cl.cl_target_id
+      AND cl.cl_type IN ('page', 'subcat')
+      AND NOT EXISTS (
+        SELECT 1 FROM pagelinks pl2
+        WHERE pl2.pl_from = cl.cl_from 
+          AND pl2.pl_target_id = cl.cl_target_id
+      );
+    
+    SET v_batch_links = ROW_COUNT();
+    SET v_total_links = v_total_links + v_batch_links;
+    
+    -- Update progress
+    INSERT INTO associative_build_state (state_key, state_value) 
+    VALUES ('categorylinks_processed', v_total_links - v_pagelinks_done)
+    ON DUPLICATE KEY UPDATE state_value = v_total_links - v_pagelinks_done;
+    
+    -- Progress report every batch
+    SELECT 
+      CONCAT('Categorylinks Batch ', v_current_batch) AS status,
+      CONCAT(v_batch_start, ' - ', v_batch_end) AS page_range,
+      FORMAT(v_batch_links, 0) AS batch_links,
+      FORMAT(v_total_links, 0) AS total_links,
+      CONCAT(ROUND(100.0 * (v_batch_end - v_min_page_id) / (v_max_page_id - v_min_page_id), 1), '%') AS progress,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+    
+    SET v_batch_start = v_batch_end + 1;
+  END WHILE;
+  
+  SET v_categorylinks_done = v_total_links - v_pagelinks_done;
+  
+  -- ========================================
+  -- PHASE 3: BATCHED 'BOTH' RELATIONSHIPS
+  -- ========================================
+  
+  INSERT INTO associative_build_state (state_key, state_value, state_text) 
+  VALUES ('build_phase', 3, 'Processing dual relationships in batches')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Processing dual relationships in batches';
+  
+  -- Reset for 'both' processing
+  SET v_batch_start = v_min_page_id;
+  SET v_current_batch = 0;
+  
+  WHILE v_batch_start <= v_max_page_id DO
+    SET v_batch_end = LEAST(v_batch_start + p_batch_size - 1, v_max_page_id);
+    SET v_current_batch = v_current_batch + 1;
+    
+    -- Update existing pagelinks to 'both' where categorylink also exists
+    UPDATE sass_associative_link sal
+    SET sal.al_type = 'both'
+    WHERE sal.al_from_page_id BETWEEN v_batch_start AND v_batch_end
+      AND sal.al_type = 'pagelink'
+      AND EXISTS (
+        SELECT 1 FROM categorylinks cl
+        WHERE cl.cl_from = sal.al_from_page_id
+          AND cl.cl_target_id = sal.al_to_page_id
+          AND cl.cl_type IN ('page', 'subcat')
+      );
+    
+    SET v_batch_links = ROW_COUNT();
+    
+    -- Progress report every batch
+    SELECT 
+      CONCAT('Dual Relationships Batch ', v_current_batch) AS status,
+      CONCAT(v_batch_start, ' - ', v_batch_end) AS page_range,
+      FORMAT(v_batch_links, 0) AS updated_to_both,
+      CONCAT(ROUND(100.0 * (v_batch_end - v_min_page_id) / (v_max_page_id - v_min_page_id), 1), '%') AS progress,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+    
+    SET v_batch_start = v_batch_end + 1;
+  END WHILE;
+  
+  -- Final count
+  SET v_total_links = (SELECT COUNT(*) FROM sass_associative_link);
+  
+  -- Update final state
+  INSERT INTO associative_build_state (state_key, state_value, state_text) 
+  VALUES ('build_phase', 4, 'Build completed successfully')
+  ON DUPLICATE KEY UPDATE state_value = 4, state_text = 'Build completed successfully';
+  
+  INSERT INTO associative_build_state (state_key, state_value) 
+  VALUES ('total_associative_links', v_total_links)
+  ON DUPLICATE KEY UPDATE state_value = v_total_links;
+  
+  -- Final summary
   SELECT 
-    'Optimized Associative Build Complete' AS status,
+    'Batched Associative Build Complete' AS status,
+    FORMAT(v_pagelinks_done, 0) AS pagelinks_added,
+    FORMAT(v_categorylinks_done, 0) AS categorylinks_added,
     FORMAT(v_total_links, 0) AS total_links_created,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
-  -- Quick statistics
+  -- Link type distribution
   SELECT 
     al_type,
     FORMAT(COUNT(*), 0) AS count,
