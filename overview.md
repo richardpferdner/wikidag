@@ -31,6 +31,32 @@ Extract and materialize a DAG tree of Wikipedia categories and articles for Geog
   - page_is_leaf: TRUE for articles, FALSE for categories
 - Handles pages appearing in multiple GSSS categories through deduplication
 
+gsss_page: 15,119,748 rows
++-------+------------+------------+
+| level | page_count | percentage |
++-------+------------+------------+
+|     0 | 3          | 0.0%       |
+|     1 | 214        | 0.0%       |
+|     2 | 7,025      | 0.0%       |
+|     3 | 86,583     | 0.6%       |
+|     4 | 510,744    | 3.4%       |
+|     5 | 1,451,833  | 9.6%       |
+|     6 | 3,434,177  | 22.7%      |
+|     7 | 2,745,676  | 18.2%      |
+|     8 | 1,526,221  | 10.1%      |
+|     9 | 5,337,837  | 35.3%      |
+|    10 | 13,722     | 0.1%       |
+|    11 | 2,514      | 0.0%       |
+|    12 | 695        | 0.0%       |
+|    13 | 357        | 0.0%       |
+|    14 | 490        | 0.0%       |
+|    15 | 691        | 0.0%       |
+|    16 | 961        | 0.0%       |
+|    17 | 3          | 0.0%       |
+|    18 | 1          | 0.0%       |
+|    19 | 1          | 0.0%       |
++-------+------------+------------+
+
 ### Phase 2: Build Lexical Search Mapping  
 - Source tables: redirect → gsss_lexical_link
 - Create semantic equivalence mapping for alternative page titles
