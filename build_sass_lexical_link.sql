@@ -100,7 +100,7 @@ BEGIN
     r.rd_fragment as ll_to_fragment
   FROM redirect r
   JOIN page p_from ON r.rd_from = p_from.page_id
-  JOIN sass_page sp_from ON p_from.page_id = sp_from.page_id  -- Source must be in SASS
+
   JOIN page p_target ON p_target.page_title = r.rd_title 
     AND p_target.page_namespace = r.rd_namespace
   JOIN sass_page sp_target ON p_target.page_id = sp_target.page_id  -- Target must be in SASS
@@ -136,7 +136,7 @@ BEGIN
         1 as chain_level
       FROM redirect r
       JOIN page p_from ON r.rd_from = p_from.page_id
-      JOIN sass_page sp_from ON p_from.page_id = sp_from.page_id
+
       JOIN page p_target ON p_target.page_title = r.rd_title 
         AND p_target.page_namespace = r.rd_namespace
       WHERE r.rd_interwiki = 0x
@@ -263,7 +263,7 @@ BEGIN
     r.rd_fragment as ll_to_fragment
   FROM redirect r
   JOIN page p_from ON r.rd_from = p_from.page_id
-  JOIN sass_page sp_from ON p_from.page_id = sp_from.page_id  -- Source must be in SASS
+
   JOIN page p_target ON p_target.page_title = r.rd_title 
     AND p_target.page_namespace = r.rd_namespace
   JOIN sass_page sp_target ON p_target.page_id = sp_target.page_id  -- Target must be in SASS
