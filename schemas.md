@@ -1,143 +1,244 @@
-Table Schemas
+-- GSSS Wikipedia Category Tree Builder - Phase 1 (Incremental)
+-- Builds materialized DAG tree of GSSS categories and articles
+-- Supports incremental builds with level ranges
 
-== From enwiki data dumps ==
+-- Phase 2 Preparation: Clean title table for lexical search
+CREATE TABLE IF NOT EXISTS gsss_clean_titles (
+  page_id INT UNSIGNED PRIMARY KEY,
+  clean_title VARCHAR(255) NOT NULL,
+  INDEX idx_clean_title (clean_title)
+) ENGINE=InnoDB;
 
-categorylinks: 208,756,116 rows
-+-------------------+------------------------------+------+-----+
-| Field             | Type                         | Null | Key | 
-+-------------------+------------------------------+------+-----+
-| cl_from           | int unsigned                 | NO   | PRI | 
-| cl_to             | varbinary(255)               | NO   | MUL |
-| cl_sortkey        | varbinary(230)               | NO   |     |
-| cl_timestamp      | timestamp                    | NO   |     |
-| cl_sortkey_prefix | varbinary(255)               | NO   |     |
-| cl_collation      | varbinary(32)                | NO   |     |
-| cl_type           | enum('page','subcat','file') | NO   |     | 
-| cl_collation_id   | smallint unsigned            | NO   |     | 
-| cl_target_id      | bigint unsigned              | NO   | PRI | 
-+-------------------+------------------------------+------+-----+
-High value: 
-- cl_from - page.page_id of page in category
-- cl_target_id - page.page_id of category 
+-- ========================================
+-- TABLE DEFINITIONS
+-- ========================================
 
-Notes:
-- cl_to - string of category, should match category's page_title
-- cl_type → what kind of page cl_from is. 
-  - cl_type refers to the thing being categorized, i.e. the page identified by cl_from, not the category (cl_to)
+-- Main GSSS page table matching schemas.md specification
+CREATE TABLE IF NOT EXISTS gsss_page (
+  page_id INT UNSIGNED NOT NULL,
+  page_title VARCHAR(255) NOT NULL,
+  page_parent_id INT NOT NULL,
+  page_root_id INT NOT NULL,
+  page_dag_level INT NOT NULL,
+  page_is_leaf TINYINT(1) NOT NULL DEFAULT 0,
   
-page: 63,942,562 rows
-+--------------------+------------------+------+-----+---------+
-| Field              | Type             | Null | Key | Default | 
-+--------------------+------------------+------+-----+---------+
-| page_id            | int unsigned     | NO   | PRI | NULL    | 
-| page_namespace     | int              | NO   | MUL | 0       |
-| page_title         | varbinary(255)   | NO   |     |         |
-| page_is_redirect   | tinyint unsigned | NO   | MUL | 0       |
-| page_is_new        | tinyint unsigned | NO   |     | 0       |
-| page_random        | double unsigned  | NO   | MUL | 0       |
-| page_touched       | binary(14)       | NO   |     | NULL    |
-| page_links_updated | binary(14)       | YES  |     | NULL    |
-| page_latest        | int unsigned     | NO   |     | 0       |
-| page_len           | int unsigned     | NO   | MUL | 0       |
-| page_content_model | varbinary(32)    | YES  |     | NULL    |
-| page_lang          | varbinary(35)    | YES  |     | NULL    |
-+--------------------+------------------+------+-----+---------+
-High value:
-- page_id
-- page_title
-- page_namespace:
- - 0 = article
- - 14 = category
-- page_content_model
- - 'wikitext' - most articles
-- page_is_redirect: Boolean flag indicating if this page redirects to another page:
- - 1 = Redirect page (has entry in redirect table)
- - 0 = Normal content page
-Notes:
+  PRIMARY KEY (page_id),
+  INDEX idx_title (page_title),
+  INDEX idx_parent (page_parent_id),
+  INDEX idx_root (page_root_id),
+  INDEX idx_level (page_dag_level),
+  INDEX idx_leaf (page_is_leaf)
+) ENGINE=InnoDB;
 
-pagelinks: 1,586,173,596 rows
-+-------------------+-----------------+------+-----+---------+
-| Field             | Type            | Null | Key | Default | 
-+-------------------+-----------------+------+-----+---------+
-| pl_from           | int unsigned    | NO   | PRI | 0       |
-| pl_from_namespace | int             | NO   | MUL | 0       |
-| pl_target_id      | bigint unsigned | NO   | PRI | NULL    |
-+-------------------+-----------------+------+-----+---------+
-High value:
-- pl_from: page.page_id of page the link is coming from
-- pl_target_id - page.page_id of page linked going to 
-Notes:
-- pl_from_namespace:
- - 0 = article
- - 14 = category
-   
-redirect: 14,843,089 rows
-+---------------+------------------+------+-----+---------+
-| Field         | Type             | Null | Key | Default |
-+---------------+------------------+------+-----+---------+
-| rd_from       | int(8) unsigned  | NO   | PRI | 0       |
-| rd_namespace  | int(11)          | NO   | MUL | 0       |
-| rd_title      | varbinary(255)   | NO   | MUL |         |
-| rd_interwiki  | varbinary(32)    | YES  |     | NULL    |
-| rd_fragment   | varbinary(255)   | YES  |     | NULL    |
-+---------------+------------------+------+-----+---------+
-High value:
-- rd_from: page_id of the redirect page
-- rd_namespace: target page's type
- - 0 = article
- - 14 = category
-- rd_title: string of target page title
- - this is the string used to match the target's page_title to find the page_id
-- rd_interwiki: if not null, it is an external link (exclude)
-- rd_fragment: if not null, a string containing the section in the page (e.g., "History")
-Notes:
+-- Temporary working table for current build iteration
+CREATE TABLE IF NOT EXISTS gsss_work (
+  page_id INT UNSIGNED NOT NULL,
+  parent_id INT UNSIGNED NOT NULL,
+  root_id INT NOT NULL,
+  level INT NOT NULL,
+  
+  PRIMARY KEY (page_id, parent_id),
+  INDEX idx_level (level),
+  INDEX idx_root (root_id),
+  INDEX idx_parent (parent_id)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
 
-== New tables in this project ==
+-- Root category mapping
+CREATE TABLE IF NOT EXISTS gsss_roots (
+  root_id INT PRIMARY KEY,
+  root_name VARCHAR(255) NOT NULL,
+  page_id INT UNSIGNED NOT NULL,
+  INDEX idx_name (root_name),
+  INDEX idx_page_id (page_id)
+) ENGINE=InnoDB;
 
-gsss_page: DAG tree of category pages with article pages as leaves
-+----------------+------------------+------+-----+--------------+
-| Field          | Type             | Null | Key | Default      |
-+----------------+------------------+------+-----+--------------+
-| page_id        | int unsigned     | NO   | PRI | NULL         |
-| page_title     | varchar(255)     | NO   | MUL |              |
-| page_parent_id | int              | NO   | PRI | NULL         |
-| page_root_id   | int              | NO   | PRI | NULL         |
-| page_dag_level | int              | NO   | MUL | NULL         |
-| page_is_leaf   | tinyint(1)       | NO   | MUL | 0            |
-+----------------+------------------+------+-----+--------------+
+-- Build state tracking table
+CREATE TABLE IF NOT EXISTS build_state (
+  state_key VARCHAR(255) PRIMARY KEY,
+  state_value INT NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
 
-Notes:
-- Materialized DAG tree of GSSS (Business, Science, Technology, Engineering, Mathematics) categories and articles
-- page_dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
-- page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
-- page_root_id → which of the 5 main GSSS domains this page belongs to
+-- Cycle detection results table
+CREATE TABLE IF NOT EXISTS gsss_cycles (
+  page_id INT UNSIGNED NOT NULL,
+  ancestor_id INT UNSIGNED NOT NULL,
+  path_length INT NOT NULL,
+  detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_page (page_id),
+  INDEX idx_ancestor (ancestor_id),
+  INDEX idx_path_length (path_length)
+) ENGINE=InnoDB;
 
-gsss_lexical_link: Lexical links (this string connects to that page)
-+----------------+------------------+------+-----+---------+
-| Field          | Type             | Null | Key | Default |
-+----------------+------------------+------+-----+---------+
-| ll_from_title  | varbinary(255)   | NO   | MUL |         |
-| ll_to_page_id  | int(8) unsigned  | NO   | PRI | 0       |
-| ll_to_fragment | varbinary(255)   | YES  |     | NULL    |
-+----------------+------------------+------+-----+---------+
-Notes:
-- ll_from_title: string from the enwiki rd_from's page.page_title
- - this is the lexical/sematic string to match on for redirect
-- ll_to_page_id: page to redirect to
-- ll_to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
+-- ========================================
+-- PERFORMANCE INDEXES ON SOURCE TABLES
+-- ========================================
 
-gsss_associative_link: Associative links (conceptual relationships between pages)
-+----------------+------------------------------------------+------+-----+---------+
-| Field          | Type                                     | Null | Key | Default |
-+----------------+------------------------------------------+------+-----+---------+
-| al_from_page_id| int unsigned                             | NO   | PRI | NULL    |
-| al_to_page_id  | int unsigned                             | NO   | PRI | NULL    |
-| al_type        | enum('pagelink','categorylink','both')   | NO   |     | NULL    |
-+----------------+------------------------------------------+------+-----+---------+
-Notes:
-- al_from_page_id: The page ID where the link originates
-- al_to_page_id: The page ID the link points to
-- al_type: Specifies the origin of the relationship
-  - 'pagelink': Relationship from pagelinks table (article-to-article links)
-  - 'categorylink': Relationship from categorylinks table (category membership)
-  - 'both': Relationship exists in both pagelinks and categorylinks
+-- Critical indexes for fast traversal (skip if already exist)
+-- These may already exist from previous runs
+
+-- ========================================
+-- INITIALIZATION - Find Root Categories
+-- ========================================
+
+-- Step 1: Find exact binary values for root categories
+-- Run this first to get the binary literals, then replace in the INSERT below
+/*
+SELECT page_id, page_title, CONVERT(page_title, CHAR) as readable
+FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext'
+  AND CONVERT(page_title, CHAR) IN ('Geography', 'Science', 'Social_sciences');
+*/
+
+-- Step 2: Initialize root category mapping with binary literals (update after Step 1)
+-- TODO: Replace these with actual binary values found above
+INSERT IGNORE INTO gsss_roots (root_id, root_name, page_id)
+SELECT 1, 'Geography', page_id FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext' 
+  AND page_title = 'Geography'
+UNION ALL
+SELECT 2, 'Science', page_id FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext'
+  AND page_title = 'Science'  
+UNION ALL
+SELECT 3, 'Social_sciences', page_id FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext'
+  AND page_title = 'Social_sciences';
+
+-- ========================================
+-- SIMPLIFIED BUILD PROCEDURE
+-- ========================================
+
+DROP PROCEDURE IF EXISTS BuildGSSSPageTree;
+
+DELIMITER //
+
+CREATE PROCEDURE BuildGSSSPageTree(
+  IN p_begin_level INT,
+  IN p_end_level INT,
+  IN p_batch_size INT
+)
+BEGIN
+  DECLARE v_current_level INT;
+  DECLARE v_rows_added INT DEFAULT 0;
+  DECLARE v_total_new_pages INT DEFAULT 0;
+  DECLARE v_start_time DECIMAL(14,3);
+  DECLARE v_continue TINYINT(1) DEFAULT 1;
+  
+  -- Set defaults
+  IF p_begin_level IS NULL THEN SET p_begin_level = 0; END IF;
+  IF p_end_level IS NULL THEN SET p_end_level = 12; END IF;
+  IF p_batch_size IS NULL THEN SET p_batch_size = 50000; END IF;
+
+  SET v_start_time = UNIX_TIMESTAMP();
+  SET v_current_level = p_begin_level;
+  
+  -- Clear working table
+  TRUNCATE TABLE gsss_work;
+  
+  -- Initialize with root categories for level 0
+  IF p_begin_level = 0 THEN
+    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
+    SELECT page_id, 0, root_id, 0 FROM gsss_roots;
+    
+    -- Add root categories to gsss_page
+    INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
+    SELECT p.page_id, p.page_title, 0, gr.root_id, 0, 0
+    FROM gsss_roots gr
+    JOIN page p ON gr.page_id = p.page_id;
+    
+    SET v_total_new_pages = ROW_COUNT();
+    SET v_current_level = 1;
+  END IF;
+  
+  -- Level-by-level traversal
+  WHILE v_current_level <= p_end_level AND v_continue = 1 DO
+    
+    -- Track current level
+    INSERT INTO build_state (state_key, state_value) 
+    VALUES ('last_attempted_level', v_current_level)
+    ON DUPLICATE KEY UPDATE state_value = v_current_level;
+    
+    -- Find children of current level parents (exclude binary junk)
+    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
+    SELECT DISTINCT
+      cl.cl_from,
+      w.page_id,
+      w.root_id,
+      v_current_level
+    FROM gsss_work w
+    JOIN categorylinks cl ON w.page_id = cl.cl_target_id
+    JOIN page p ON cl.cl_from = p.page_id
+    WHERE w.level = v_current_level - 1
+      AND cl.cl_type IN ('page', 'subcat')
+      AND p.page_namespace IN (0, 14)
+      AND p.page_content_model = 'wikitext'  -- Filter out binary junk
+      AND NOT EXISTS (SELECT 1 FROM gsss_page bp WHERE bp.page_id = cl.cl_from);
+    
+    SET v_rows_added = ROW_COUNT();
+    
+    -- Add new pages to gsss_page (handle multiple parents by selecting first)
+    INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
+    SELECT 
+      p.page_id,
+      CONVERT(p.page_title, CHAR) as clean_title,  -- Convert binary to readable
+      MIN(w.parent_id),
+      MIN(w.root_id),
+      v_current_level,
+      CASE WHEN p.page_namespace = 0 THEN 1 ELSE 0 END
+    FROM gsss_work w
+    JOIN page p ON w.page_id = p.page_id
+    WHERE w.level = v_current_level
+      AND p.page_content_model = 'wikitext'  -- Double-check clean data
+    GROUP BY p.page_id
+    LIMIT p_batch_size;
+    
+    SET v_total_new_pages = v_total_new_pages + ROW_COUNT();
+    
+    -- Check if we should continue
+    IF v_rows_added = 0 THEN
+      SET v_continue = 0;
+    ELSE
+      SET v_current_level = v_current_level + 1;
+    END IF;
+    
+  END WHILE;
+  
+  -- Update completed level
+  INSERT INTO build_state (state_key, state_value) 
+  VALUES ('last_completed_level', v_current_level - 1)
+  ON DUPLICATE KEY UPDATE state_value = v_current_level - 1;
+  
+  -- Report results
+  SELECT 
+    'Build Complete' AS status,
+    p_begin_level AS requested_begin_level,
+    p_end_level AS requested_end_level,
+    v_current_level - 1 AS actual_end_level,
+    v_total_new_pages AS new_pages_added,
+    (SELECT COUNT(*) FROM gsss_page) AS total_pages_now,
+    ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_execution_time_sec;
+
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- EXAMPLE USAGE
+-- ========================================
+
+/*
+-- Initial build (levels 0-5):
+CALL BuildGSSSPageTree(0, 5, NULL);
+
+-- Continue building (levels 6-10):  
+CALL BuildGSSSPageTree(6, 10, NULL);
+
+-- Check current status:
+SELECT * FROM build_state;
+SELECT COUNT(*) AS total_pages, MAX(page_dag_level) AS max_level FROM gsss_page;
+*/
