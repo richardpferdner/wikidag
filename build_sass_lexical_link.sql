@@ -104,7 +104,7 @@ BEGIN
   JOIN page p_target ON p_target.page_title = r.rd_title 
     AND p_target.page_namespace = r.rd_namespace
   JOIN sass_page sp_target ON p_target.page_id = sp_target.page_id  -- Target must be in SASS
-  WHERE r.rd_interwiki IS NULL
+  WHERE r.rd_interwiki = 0x
     AND p_from.page_content_model = 'wikitext'
     AND p_target.page_content_model = 'wikitext'
     AND r.rd_namespace IN (0, 14);
@@ -139,7 +139,7 @@ BEGIN
       JOIN sass_page sp_from ON p_from.page_id = sp_from.page_id
       JOIN page p_target ON p_target.page_title = r.rd_title 
         AND p_target.page_namespace = r.rd_namespace
-      WHERE r.rd_interwiki IS NULL
+      WHERE r.rd_interwiki = 0x
         AND p_from.page_content_model = 'wikitext'
         AND p_target.page_content_model = 'wikitext'
         AND r.rd_namespace IN (0, 14)
@@ -160,7 +160,7 @@ BEGIN
       JOIN page p_final ON p_final.page_title = r2.rd_title 
         AND p_final.page_namespace = r2.rd_namespace
       WHERE rc.chain_level < p_max_chain_depth
-        AND r2.rd_interwiki IS NULL
+        AND r2.rd_interwiki = 0x
         AND p_final.page_content_model = 'wikitext'
         AND r2.rd_namespace IN (0, 14)
         AND (p_enable_cycle_detection = 0 OR rc.chain_start != p_final.page_id)  -- Cycle prevention
@@ -267,7 +267,7 @@ BEGIN
   JOIN page p_target ON p_target.page_title = r.rd_title 
     AND p_target.page_namespace = r.rd_namespace
   JOIN sass_page sp_target ON p_target.page_id = sp_target.page_id  -- Target must be in SASS
-  WHERE r.rd_interwiki IS NULL
+  WHERE r.rd_interwiki = 0x
     AND p_from.page_content_model = 'wikitext'
     AND p_target.page_content_model = 'wikitext'
     AND r.rd_namespace IN (0, 14);
