@@ -2,6 +2,13 @@
 -- Builds materialized DAG tree of GSSS categories and articles
 -- Supports incremental builds with level ranges
 
+-- Phase 2 Preparation: Clean title table for lexical search
+CREATE TABLE IF NOT EXISTS gsss_clean_titles (
+  page_id INT UNSIGNED PRIMARY KEY,
+  clean_title VARCHAR(255) NOT NULL,
+  INDEX idx_clean_title (clean_title)
+) ENGINE=InnoDB;
+
 -- ========================================
 -- TABLE DEFINITIONS
 -- ========================================
@@ -71,20 +78,35 @@ CREATE TABLE IF NOT EXISTS gsss_cycles (
 -- These may already exist from previous runs
 
 -- ========================================
--- INITIALIZATION
+-- INITIALIZATION - Find Root Categories
 -- ========================================
 
--- Initialize root category mapping
+-- Step 1: Find exact binary values for root categories
+-- Run this first to get the binary literals, then replace in the INSERT below
+/*
+SELECT page_id, page_title, CONVERT(page_title, CHAR) as readable
+FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext'
+  AND CONVERT(page_title, CHAR) IN ('Geography', 'Science', 'Social_sciences');
+*/
+
+-- Step 2: Initialize root category mapping with binary literals
 INSERT IGNORE INTO gsss_roots (root_id, root_name, page_id)
-SELECT 1, 'Business', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Business'
+SELECT 1, 'Geography', page_id FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext' 
+  AND page_title = 0x47656F677261706879
 UNION ALL
-SELECT 2, 'Science', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Science'  
+SELECT 2, 'Science', page_id FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext'
+  AND page_title = 0x536369656E6365
 UNION ALL
-SELECT 3, 'Technology', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Technology'
-UNION ALL
-SELECT 4, 'Engineering', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Engineering'
-UNION ALL
-SELECT 5, 'Mathematics', page_id FROM page WHERE page_namespace = 14 AND page_title = 'Mathematics';
+SELECT 3, 'Social_sciences', page_id FROM page 
+WHERE page_namespace = 14 
+  AND page_content_model = 'wikitext'
+  AND page_title = 0x536F6369616C5F736369656E636573;
 
 -- ========================================
 -- SIMPLIFIED BUILD PROCEDURE
@@ -140,7 +162,7 @@ BEGIN
     VALUES ('last_attempted_level', v_current_level)
     ON DUPLICATE KEY UPDATE state_value = v_current_level;
     
-    -- Find children of current level parents
+    -- Find children of current level parents (exclude binary junk)
     INSERT INTO gsss_work (page_id, parent_id, root_id, level)
     SELECT DISTINCT
       cl.cl_from,
@@ -148,11 +170,13 @@ BEGIN
       w.root_id,
       v_current_level
     FROM gsss_work w
-    JOIN categorylinks cl ON w.page_id = cl.cl_target_id
+    JOIN page parent_page ON w.page_id = parent_page.page_id
+    JOIN categorylinks cl ON parent_page.page_title = cl.cl_to
     JOIN page p ON cl.cl_from = p.page_id
     WHERE w.level = v_current_level - 1
       AND cl.cl_type IN ('page', 'subcat')
       AND p.page_namespace IN (0, 14)
+      AND p.page_content_model = 'wikitext'  -- Filter out binary junk
       AND NOT EXISTS (SELECT 1 FROM gsss_page bp WHERE bp.page_id = cl.cl_from);
     
     SET v_rows_added = ROW_COUNT();
@@ -161,7 +185,7 @@ BEGIN
     INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT 
       p.page_id,
-      p.page_title,
+      CONVERT(p.page_title, CHAR) as clean_title,  -- Convert binary to readable
       MIN(w.parent_id),
       MIN(w.root_id),
       v_current_level,
@@ -169,6 +193,7 @@ BEGIN
     FROM gsss_work w
     JOIN page p ON w.page_id = p.page_id
     WHERE w.level = v_current_level
+      AND p.page_content_model = 'wikitext'  -- Double-check clean data
     GROUP BY p.page_id
     LIMIT p_batch_size;
     
