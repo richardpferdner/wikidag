@@ -163,7 +163,7 @@ BEGIN
     ON DUPLICATE KEY UPDATE state_value = v_current_level;
     
     -- Find children of current level parents (exclude binary junk)
-    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
+    INSERT IGNORE INTO gsss_work (page_id, parent_id, root_id, level)
     SELECT DISTINCT
       cl.cl_from,
       w.page_id,
