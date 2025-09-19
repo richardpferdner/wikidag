@@ -50,6 +50,8 @@ sass_page: 9,392,822 rows
 
 ### Phase 2: Build Lexical Search Mapping  
 - Source tables: redirect → sass_lexical_link
+ - only page_titles in sass_page will be included in ll_from_title
+ - only page_ids in sass_page will be included in ll_to_page_id  
 - Create semantic equivalence mapping for alternative page titles
 - Enables lexical search by mapping redirects (e.g., "ML" → "Machine Learning") to canonical pages
 - Schema:
