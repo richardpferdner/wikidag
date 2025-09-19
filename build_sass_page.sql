@@ -1,5 +1,5 @@
--- GSSS Wikipedia Category Tree Builder - Phase 1 (Fixed)
--- Builds materialized DAG tree of GSSS categories and articles
+-- SASS Wikipedia Category Tree Builder - Phase 1 (Fixed)
+-- Builds materialized DAG tree of SASS categories and articles
 -- Processes ALL valid records per level (no truncation)
 
 -- ========================================
@@ -7,14 +7,14 @@
 -- ========================================
 
 -- Phase 2 Preparation: Clean title table for lexical search
-CREATE TABLE IF NOT EXISTS gsss_clean_titles (
+CREATE TABLE IF NOT EXISTS sass_clean_titles (
   page_id INT UNSIGNED PRIMARY KEY,
   clean_title VARCHAR(255) NOT NULL,
   INDEX idx_clean_title (clean_title)
 ) ENGINE=InnoDB;
 
--- Main GSSS page table matching schemas.md specification
-CREATE TABLE IF NOT EXISTS gsss_page (
+-- Main SASS page table matching schemas.md specification
+CREATE TABLE IF NOT EXISTS sass_page (
   page_id INT UNSIGNED NOT NULL,
   page_title VARCHAR(255) NOT NULL,
   page_parent_id INT NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS gsss_page (
 ) ENGINE=InnoDB;
 
 -- Temporary working table for current build iteration
-CREATE TABLE IF NOT EXISTS gsss_work (
+CREATE TABLE IF NOT EXISTS sass_work (
   page_id INT UNSIGNED NOT NULL,
   parent_id INT UNSIGNED NOT NULL,
   root_id INT NOT NULL,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS gsss_work (
 ) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
 
 -- Root category mapping
-CREATE TABLE IF NOT EXISTS gsss_roots (
+CREATE TABLE IF NOT EXISTS sass_roots (
   root_id INT PRIMARY KEY,
   root_name VARCHAR(255) NOT NULL,
   page_id INT UNSIGNED NOT NULL,
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS build_state (
 ) ENGINE=InnoDB;
 
 -- Cycle detection results table
-CREATE TABLE IF NOT EXISTS gsss_cycles (
+CREATE TABLE IF NOT EXISTS sass_cycles (
   page_id INT UNSIGNED NOT NULL,
   ancestor_id INT UNSIGNED NOT NULL,
   path_length INT NOT NULL,
@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS gsss_cycles (
 -- ========================================
 
 -- Initialize root category mapping with binary literals
-INSERT IGNORE INTO gsss_roots (root_id, root_name, page_id)
+INSERT IGNORE INTO sass_roots (root_id, root_name, page_id)
 SELECT 1, 'Geography', page_id FROM page 
 WHERE page_namespace = 14 
   AND page_content_model = 'wikitext' 
@@ -95,11 +95,11 @@ WHERE page_namespace = 14
 -- FIXED BUILD PROCEDURE - NO TRUNCATION
 -- ========================================
 
-DROP PROCEDURE IF EXISTS BuildGSSSPageTree;
+DROP PROCEDURE IF EXISTS BuildSASSPageTree;
 
 DELIMITER //
 
-CREATE PROCEDURE BuildGSSSPageTree(
+CREATE PROCEDURE BuildSASSPageTree(
   IN p_begin_level INT,
   IN p_end_level INT,
   IN p_batch_size INT  -- Now used for chunked processing, not limits
@@ -122,17 +122,17 @@ BEGIN
   SET v_current_level = p_begin_level;
   
   -- Clear working table
-  TRUNCATE TABLE gsss_work;
+  TRUNCATE TABLE sass_work;
   
   -- Initialize with root categories for level 0
   IF p_begin_level = 0 THEN
-    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
-    SELECT page_id, 0, root_id, 0 FROM gsss_roots;
+    INSERT INTO sass_work (page_id, parent_id, root_id, level)
+    SELECT page_id, 0, root_id, 0 FROM sass_roots;
     
-    -- Add root categories to gsss_page
-    INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
+    -- Add root categories to sass_page
+    INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT p.page_id, p.page_title, 0, gr.root_id, 0, 0
-    FROM gsss_roots gr
+    FROM sass_roots gr
     JOIN page p ON gr.page_id = p.page_id;
     
     SET v_total_new_pages = ROW_COUNT();
@@ -148,13 +148,13 @@ BEGIN
     ON DUPLICATE KEY UPDATE state_value = v_current_level;
     
     -- Find children of current level parents (all records, no limit)
-    INSERT IGNORE INTO gsss_work (page_id, parent_id, root_id, level)
+    INSERT IGNORE INTO sass_work (page_id, parent_id, root_id, level)
     SELECT DISTINCT
       cl.cl_from,
       w.page_id,
       w.root_id,
       v_current_level
-    FROM gsss_work w
+    FROM sass_work w
     JOIN page parent_page ON w.page_id = parent_page.page_id
     JOIN categorylinks cl ON parent_page.page_title = cl.cl_to
     JOIN page p ON cl.cl_from = p.page_id
@@ -162,7 +162,7 @@ BEGIN
       AND cl.cl_type IN ('page', 'subcat')
       AND p.page_namespace IN (0, 14)
       AND p.page_content_model = 'wikitext'
-      AND NOT EXISTS (SELECT 1 FROM gsss_page bp WHERE bp.page_id = cl.cl_from);
+      AND NOT EXISTS (SELECT 1 FROM sass_page bp WHERE bp.page_id = cl.cl_from);
     
     SET v_rows_added = ROW_COUNT();
     
@@ -171,8 +171,8 @@ BEGIN
     SET v_level_complete = 0;
     
     WHILE v_level_complete = 0 DO
-      -- Add pages to gsss_page in batches
-      INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
+      -- Add pages to sass_page in batches
+      INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
       SELECT 
         p.page_id,
         CONVERT(p.page_title, CHAR) as clean_title,
@@ -180,7 +180,7 @@ BEGIN
         MIN(w.root_id),
         v_current_level,
         CASE WHEN p.page_namespace = 0 THEN 1 ELSE 0 END
-      FROM gsss_work w
+      FROM sass_work w
       JOIN page p ON w.page_id = p.page_id
       WHERE w.level = v_current_level
         AND p.page_content_model = 'wikitext'
@@ -208,8 +208,8 @@ BEGIN
     SELECT 
       CONCAT('Level ', v_current_level - 1, ' completed') AS status,
       v_rows_added AS pages_found,
-      (SELECT COUNT(*) FROM gsss_page WHERE page_dag_level = v_current_level - 1) AS pages_added_this_level,
-      (SELECT COUNT(*) FROM gsss_page) AS total_pages_so_far,
+      (SELECT COUNT(*) FROM sass_page WHERE page_dag_level = v_current_level - 1) AS pages_added_this_level,
+      (SELECT COUNT(*) FROM sass_page) AS total_pages_so_far,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_time_sec;
     
   END WHILE;
@@ -226,15 +226,15 @@ BEGIN
     p_end_level AS requested_end_level,
     v_current_level - 1 AS actual_end_level,
     v_total_new_pages AS new_pages_added,
-    (SELECT COUNT(*) FROM gsss_page) AS total_pages_now,
+    (SELECT COUNT(*) FROM sass_page) AS total_pages_now,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_execution_time_sec;
 
   -- Show level breakdown
   SELECT 
     page_dag_level,
     FORMAT(COUNT(*), 0) as pages_count,
-    ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM gsss_page), 2) as percentage
-  FROM gsss_page 
+    ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM sass_page), 2) as percentage
+  FROM sass_page 
   GROUP BY page_dag_level 
   ORDER BY page_dag_level;
 
@@ -246,11 +246,11 @@ DELIMITER ;
 -- ALTERNATIVE: Simple Non-Batched Version
 -- ========================================
 
-DROP PROCEDURE IF EXISTS BuildGSSSPageTreeSimple;
+DROP PROCEDURE IF EXISTS BuildSASSPageTreeSimple;
 
 DELIMITER //
 
-CREATE PROCEDURE BuildGSSSPageTreeSimple(
+CREATE PROCEDURE BuildSASSPageTreeSimple(
   IN p_begin_level INT,
   IN p_end_level INT
 )
@@ -269,16 +269,16 @@ BEGIN
   SET v_current_level = p_begin_level;
   
   -- Clear working table
-  TRUNCATE TABLE gsss_work;
+  TRUNCATE TABLE sass_work;
   
   -- Initialize with root categories for level 0
   IF p_begin_level = 0 THEN
-    INSERT INTO gsss_work (page_id, parent_id, root_id, level)
-    SELECT page_id, 0, root_id, 0 FROM gsss_roots;
+    INSERT INTO sass_work (page_id, parent_id, root_id, level)
+    SELECT page_id, 0, root_id, 0 FROM sass_roots;
     
-    INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
+    INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT p.page_id, p.page_title, 0, gr.root_id, 0, 0
-    FROM gsss_roots gr
+    FROM sass_roots gr
     JOIN page p ON gr.page_id = p.page_id;
     
     SET v_total_new_pages = ROW_COUNT();
@@ -289,13 +289,13 @@ BEGIN
   WHILE v_current_level <= p_end_level AND v_continue = 1 DO
     
     -- Find ALL children (no limits)
-    INSERT IGNORE INTO gsss_work (page_id, parent_id, root_id, level)
+    INSERT IGNORE INTO sass_work (page_id, parent_id, root_id, level)
     SELECT DISTINCT
       cl.cl_from,
       w.page_id,
       w.root_id,
       v_current_level
-    FROM gsss_work w
+    FROM sass_work w
     JOIN page parent_page ON w.page_id = parent_page.page_id
     JOIN categorylinks cl ON parent_page.page_title = cl.cl_to
     JOIN page p ON cl.cl_from = p.page_id
@@ -303,12 +303,12 @@ BEGIN
       AND cl.cl_type IN ('page', 'subcat')
       AND p.page_namespace IN (0, 14)
       AND p.page_content_model = 'wikitext'
-      AND NOT EXISTS (SELECT 1 FROM gsss_page bp WHERE bp.page_id = cl.cl_from);
+      AND NOT EXISTS (SELECT 1 FROM sass_page bp WHERE bp.page_id = cl.cl_from);
     
     SET v_rows_added = ROW_COUNT();
     
     -- Add ALL new pages (no batch limit)
-    INSERT IGNORE INTO gsss_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
+    INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT 
       p.page_id,
       CONVERT(p.page_title, CHAR) as clean_title,
@@ -316,7 +316,7 @@ BEGIN
       MIN(w.root_id),
       v_current_level,
       CASE WHEN p.page_namespace = 0 THEN 1 ELSE 0 END
-    FROM gsss_work w
+    FROM sass_work w
     JOIN page p ON w.page_id = p.page_id
     WHERE w.level = v_current_level
       AND p.page_content_model = 'wikitext'
@@ -330,7 +330,7 @@ BEGIN
       CONCAT('Level ', v_current_level, ' completed') AS status,
       FORMAT(v_rows_added, 0) AS candidates_found,
       FORMAT(ROW_COUNT(), 0) AS pages_added,
-      FORMAT((SELECT COUNT(*) FROM gsss_page), 0) AS total_pages,
+      FORMAT((SELECT COUNT(*) FROM sass_page), 0) AS total_pages,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
     
     IF v_rows_added = 0 THEN
@@ -346,15 +346,15 @@ BEGIN
     'COMPLETE - All Valid Records Processed' AS final_status,
     v_current_level - 1 AS max_level_reached,
     FORMAT(v_total_new_pages, 0) AS total_pages_added,
-    FORMAT((SELECT COUNT(*) FROM gsss_page), 0) AS final_page_count,
+    FORMAT((SELECT COUNT(*) FROM sass_page), 0) AS final_page_count,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
 
   -- Level distribution
   SELECT 
     page_dag_level as level,
     FORMAT(COUNT(*), 0) as page_count,
-    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM gsss_page), 1), '%') as percentage
-  FROM gsss_page 
+    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM sass_page), 1), '%') as percentage
+  FROM sass_page 
   GROUP BY page_dag_level 
   ORDER BY page_dag_level;
 
@@ -368,14 +368,14 @@ DELIMITER ;
 
 /*
 -- For complete processing without truncation:
-CALL BuildGSSSPageTreeSimple(0, 12);
+CALL BuildSASSPageTreeSimple(0, 12);
 
 -- For batched processing (if memory constraints):
-CALL BuildGSSSPageTree(0, 12, 50000);
+CALL BuildSASSPageTree(0, 12, 50000);
 
 -- Check results:
 SELECT page_dag_level, FORMAT(COUNT(*), 0) as pages 
-FROM gsss_page 
+FROM sass_page 
 GROUP BY page_dag_level 
 ORDER BY page_dag_level;
 */
