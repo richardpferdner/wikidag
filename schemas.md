@@ -94,7 +94,7 @@ Notes:
 
 == New tables in this project ==
 
-gsss_page: 15,119,748 rows
+sass_page: 15,119,748 rows
 DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
@@ -108,12 +108,12 @@ DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 
 Notes:
-- Materialized DAG tree of GSSS (Business, Science, Technology, Engineering, Mathematics) categories and articles
+- Materialized DAG tree of SASS (Science and Social Science) categories and articles
 - page_dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
-- page_root_id → which of the 5 main GSSS domains this page belongs to
+- page_root_id → which of the 5 main SASS domains this page belongs to
 
-gsss_lexical_link: Lexical links (this string connects to that page)
+sass_lexical_link: Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
 | Field          | Type             | Null | Key | Default |
 +----------------+------------------+------+-----+---------+
@@ -127,7 +127,7 @@ Notes:
 - ll_to_page_id: page to redirect to
 - ll_to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
-gsss_associative_link: Associative links (conceptual relationships between pages)
+sass_associative_link: Associative links (conceptual relationships between pages)
 +----------------+------------------------------------------+------+-----+---------+
 | Field          | Type                                     | Null | Key | Default |
 +----------------+------------------------------------------+------+-----+---------+
