@@ -113,7 +113,8 @@ Notes:
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - page_root_id → which of the 5 main SASS domains this page belongs to
 
-sass_lexical_link: Lexical links (this string connects to that page)
+sass_lexical_link: 11,483,979 rows
+Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
 | Field          | Type             | Null | Key | Default |
 +----------------+------------------+------+-----+---------+
@@ -127,7 +128,8 @@ Notes:
 - ll_to_page_id: page to redirect to
 - ll_to_fragment: additional lexical/sematic string to find a section of the page (e.g., "History")
 
-sass_associative_link: Associative links (conceptual relationships between pages)
+sass_associative_link:166,504,762 rows
+Associative links (conceptual relationships between pages)
 +----------------+------------------------------------------+------+-----+---------+
 | Field          | Type                                     | Null | Key | Default |
 +----------------+------------------------------------------+------+-----+---------+
