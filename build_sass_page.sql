@@ -1,7 +1,12 @@
 -- SASS Wikipedia Category Tree Builder - Enhanced with Category Filtering
 -- Builds materialized DAG tree of SASS categories and articles
 -- Implements tiered filtering strategy to exclude maintenance/administrative categories
--- Processes ALL valid records per level (no truncation)
+-- Processes ALL valid records per level (no truncation
+
+-- FUTURE:
+--  Issue: The MIN(parent_id) + GROUP BY page_id logic in the build procedure 
+--         permanently discards the other parent relationships. Only one parent per page 
+--         survives into sass_page.
 
 -- ========================================
 -- TABLE DEFINITIONS
