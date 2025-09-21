@@ -48,8 +48,8 @@ BEGIN
   SELECT 'MySQL Export Environment Diagnostics' AS diagnostic_type,
          v_version AS mysql_version,
          COALESCE(v_secure_file_priv, 'NULL (exports disabled)') AS secure_file_priv_setting,
-         USER() AS current_user,
-         DATABASE() AS current_database;
+         CURRENT_USER() AS current_user,
+         SCHEMA() AS current_database;
   
   -- Test basic export capability
   SELECT 'Export Capability Test' AS test_type,
