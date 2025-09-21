@@ -399,7 +399,7 @@ BEGIN
   
   SET v_chunk_start = v_min_page_id;
   
-  WHILE v_continue = 1 AND v_current_chunk <= 10 DO  -- Limit to 10 chunks for safety
+  WHILE v_continue = 1 DO  -- Process all chunks
     SET v_chunk_end = v_chunk_start + p_chunk_size - 1;
     SET v_file_path = CONCAT(v_actual_export_path, 'sass_page_clean_chunk_', LPAD(v_current_chunk, 4, '0'), '.csv');
     SET v_error_occurred = 0;
