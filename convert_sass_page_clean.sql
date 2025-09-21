@@ -52,7 +52,7 @@ BEGIN
   SET cleaned_title = REGEXP_REPLACE(cleaned_title, '\\s+', '_');
   
   -- Step 2: Remove all quotes
-  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[\'\'""„‚"\']', '');
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[''''""„‚"'']', '');
   
   -- Step 3: Convert currency to text
   SET cleaned_title = REPLACE(cleaned_title, '€', 'Euro');
