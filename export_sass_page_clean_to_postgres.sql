@@ -401,7 +401,7 @@ BEGIN
   
   WHILE v_continue = 1 DO  -- Process all chunks
     SET v_chunk_end = v_chunk_start + p_chunk_size - 1;
-    SET v_file_path = CONCAT(v_actual_export_path, 'sass_page_clean_chunk_', LPAD(v_current_chunk, 4, '0'), '.csv');
+    SET v_file_path = CONCAT(v_actual_export_path, 'sass_page_clean_chunk_', v_current_chunk, '.csv');
     SET v_error_occurred = 0;
     
     -- Attempt to export current chunk
@@ -427,7 +427,7 @@ BEGIN
       -- Record successful chunk
       INSERT INTO export_file_validation (file_name, file_path, row_count, file_size_bytes)
       VALUES (
-        CONCAT('sass_page_clean_chunk_', LPAD(v_current_chunk, 4, '0'), '.csv'),
+        CONCAT('sass_page_clean_chunk_', v_current_chunk, '.csv'),
         v_file_path,
         v_chunk_rows,
         0
@@ -784,7 +784,7 @@ BEGIN
   WHILE v_current_chunk <= v_chunk_count DO
     SELECT CONCAT('\\COPY sass_page_clean FROM ''', 
                   COALESCE(p_import_path, '/path/to/export/files/'), 
-                  'sass_page_clean_chunk_', LPAD(v_current_chunk, 4, '0'), 
+                  'sass_page_clean_chunk_', v_current_chunk, 
                   '.csv'' WITH (FORMAT CSV, ENCODING ''UTF8'');') AS import_command;
     
     SET v_current_chunk = v_current_chunk + 1;
