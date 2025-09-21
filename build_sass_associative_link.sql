@@ -7,7 +7,7 @@
 --  Note: in page_sass, the MIN(parent_id) + GROUP BY page_id logic in the build procedure 
 --        permanently discards the other parent relationships. Only one parent per page 
 --        survives into sass_page. 
---        Later, the build_sass_associative_link.sql will be updated capture these page 
+--        Later, build_sass_associative_link.sql will be updated capture these page 
 --        and parent relationships as third al_type 'parentlink' and remove 'both' from al_type.
 
 -- ========================================
