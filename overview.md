@@ -48,6 +48,24 @@ sass_page: 9,392,822 rows
 |    10 | 93,636     | 1.0%       | 60,221    | 33,415     |
 +-------+------------+------------+-----------+------------+
 
+imported into postgres:
+ Total Records           | INFO   | 9392741 | Total pages imported
+ Level 0 Distribution    | INFO   |       2 | 0.00% of total
+ Level 1 Distribution    | INFO   |     154 | 0.00% of total
+ Level 2 Distribution    | INFO   |    5684 | 0.06% of total
+ Level 3 Distribution    | INFO   |   57503 | 0.61% of total
+ Level 4 Distribution    | INFO   |  426704 | 4.54% of total
+ Level 5 Distribution    | INFO   | 1125744 | 11.99% of total
+ Level 6 Distribution    | INFO   | 3049952 | 32.47% of total
+ Level 7 Distribution    | INFO   | 2777742 | 29.57% of total
+ Level 8 Distribution    | INFO   | 1409773 | 15.01% of total
+ Level 9 Distribution    | INFO   |  445848 | 4.75% of total
+ Level 10 Distribution   | INFO   |   93635 | 1.00% of total
+ Orphaned Records        | WARN   |     139 | Pages with parent_id not in sass_page
+ Duplicate Titles        | WARN   |  223964 | Pages with same title
+ Articles (Leaves)       | INFO   | 7229834 | 76.97% of total
+ Categories (Non-Leaves) | INFO   | 2162907 | 23.03% of total
+
 ### Phase 2: Build Lexical Search Mapping  
 - Source tables: redirect → sass_lexical_link
  - only page_titles in sass_page will be included in ll_from_title
