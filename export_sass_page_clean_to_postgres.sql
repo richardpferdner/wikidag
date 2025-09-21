@@ -37,37 +37,22 @@ DELIMITER //
 
 CREATE PROCEDURE DiagnoseExportEnvironment()
 BEGIN
-  DECLARE v_secure_file_priv VARCHAR(1000);
-  DECLARE v_version VARCHAR(100);
+  -- Show MySQL version and secure_file_priv setting
+  SHOW VARIABLES LIKE 'version';
+  SHOW VARIABLES LIKE 'secure_file_priv';
   
-  -- Get MySQL version and secure_file_priv setting
-  SELECT @@version INTO v_version;
-  SELECT @@secure_file_priv INTO v_secure_file_priv;
-  
-  -- Display system configuration
-  SELECT 'MySQL Export Environment Diagnostics' AS diagnostic_type,
-         v_version AS mysql_version,
-         COALESCE(v_secure_file_priv, 'NULL (exports disabled)') AS secure_file_priv_setting,
-         CURRENT_USER() AS current_user,
-         SCHEMA() AS current_database;
-  
-  -- Test basic export capability
-  SELECT 'Export Capability Test' AS test_type,
-         CASE 
-           WHEN v_secure_file_priv IS NULL THEN 'BLOCKED: secure_file_priv is NULL'
-           WHEN v_secure_file_priv = '' THEN 'ALLOWED: Any directory'
-           ELSE CONCAT('RESTRICTED: Only ', v_secure_file_priv)
-         END AS export_status,
-         'Use SHOW VARIABLES LIKE "secure_file_priv" for details' AS recommendation;
-  
-  -- Sample data availability check
+  -- Test data availability
   SELECT 'Data Availability Check' AS check_type,
-         FORMAT(COUNT(*), 0) AS total_rows_sass_page_clean,
-         FORMAT(COUNT(CASE WHEN page_id % 100 = 1 THEN 1 END), 0) AS sample_rows_1pct,
-         FORMAT(MIN(page_id), 0) AS min_page_id,
-         FORMAT(MAX(page_id), 0) AS max_page_id
+         COUNT(*) AS total_rows,
+         COUNT(CASE WHEN page_id % 100 = 1 THEN 1 END) AS sample_1pct,
+         MIN(page_id) AS min_id,
+         MAX(page_id) AS max_id
   FROM sass_page_clean;
-
+  
+  -- Show export recommendations
+  SELECT 'Export Recommendations' AS info_type,
+         'If secure_file_priv is NULL, file exports are disabled' AS file_export_note,
+         'Use ExportSASSPageCleanToString() for manual CSV export' AS alternative_method;
 END//
 
 DELIMITER ;
@@ -510,7 +495,320 @@ END//
 DELIMITER ;
 
 -- ========================================
--- USAGE EXAMPLES AND TROUBLESHOOTING
+-- LEGACY COMPATIBILITY PROCEDURES
+-- ========================================
+
+-- Original subset export with fixed parameters
+DROP PROCEDURE IF EXISTS ExportSASSPageCleanSubset;
+
+DELIMITER //
+
+CREATE PROCEDURE ExportSASSPageCleanSubset(
+  IN p_export_path VARCHAR(1000),
+  IN p_sample_percentage DECIMAL(5,2)
+)
+BEGIN
+  -- Try secure file export first, fall back to table creation
+  CALL ExportSASSPageCleanSecure(p_sample_percentage, 1);
+  
+  -- Show alternative method recommendation
+  SELECT 
+    'Alternative Export Method' AS method_type,
+    'CALL CreateExportTable(1.0);' AS table_method,
+    'CALL ExportSASSPageCleanToString(1.0, 100);' AS string_method,
+    'Use if file export fails due to secure_file_priv restrictions' AS usage_note;
+END//
+
+DELIMITER ;
+
+-- Original chunked export procedure
+DROP PROCEDURE IF EXISTS ExportSASSPageCleanChunked;
+
+DELIMITER //
+
+CREATE PROCEDURE ExportSASSPageCleanChunked(
+  IN p_export_path VARCHAR(1000),
+  IN p_chunk_size INT
+)
+BEGIN
+  -- Call the enhanced chunked export
+  CALL ExportSASSPageCleanChunkedFixed(p_export_path, p_chunk_size, 1);
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- VALIDATION AND UTILITY PROCEDURES
+-- ========================================
+
+DROP PROCEDURE IF EXISTS ValidateExportIntegrity;
+
+DELIMITER //
+
+CREATE PROCEDURE ValidateExportIntegrity()
+BEGIN
+  DECLARE v_total_source_rows INT DEFAULT 0;
+  DECLARE v_total_export_rows INT DEFAULT 0;
+  
+  -- Get source table count
+  SELECT COUNT(*) INTO v_total_source_rows FROM sass_page_clean;
+  
+  -- Get total exported rows
+  SELECT COALESCE(SUM(row_count), 0) INTO v_total_export_rows
+  FROM export_file_validation 
+  WHERE file_name LIKE 'sass_page_clean_chunk_%';
+  
+  -- Validation report
+  SELECT 
+    'Export Integrity Validation' AS validation_type,
+    FORMAT(v_total_source_rows, 0) AS source_table_rows,
+    FORMAT(v_total_export_rows, 0) AS exported_file_rows,
+    FORMAT(v_total_source_rows - v_total_export_rows, 0) AS row_difference,
+    CASE 
+      WHEN v_total_source_rows = v_total_export_rows THEN 'PASS'
+      ELSE 'FAIL'
+    END AS validation_status;
+  
+  -- Export file summary
+  SELECT 
+    'Export File Details' AS file_details,
+    file_name,
+    FORMAT(row_count, 0) AS rows,
+    FORMAT(file_size_bytes, 0) AS bytes,
+    created_at
+  FROM export_file_validation 
+  WHERE file_name LIKE 'sass_page_clean_%'
+  ORDER BY file_name;
+  
+  -- Data type analysis for PostgreSQL compatibility
+  SELECT 
+    'Data Type Compatibility Check' AS compatibility_check,
+    'page_id range' AS field_check,
+    FORMAT(MIN(page_id), 0) AS min_value,
+    FORMAT(MAX(page_id), 0) AS max_value,
+    'BIGINT compatible' AS postgres_type_status
+  FROM sass_page_clean
+  
+  UNION ALL
+  
+  SELECT 
+    'Data Type Compatibility Check',
+    'page_is_leaf values',
+    CAST(MIN(page_is_leaf) AS CHAR),
+    CAST(MAX(page_is_leaf) AS CHAR),
+    'BOOLEAN compatible (0/1 -> FALSE/TRUE)'
+  FROM sass_page_clean
+  
+  UNION ALL
+  
+  SELECT 
+    'Data Type Compatibility Check',
+    'page_title encoding',
+    'UTF-8 required',
+    'Check for non-ASCII chars',
+    'VARCHAR(255) compatible'
+  FROM DUAL;
+
+END//
+
+DELIMITER ;
+
+-- Data encoding validation
+DROP PROCEDURE IF EXISTS ValidateDataEncoding;
+
+DELIMITER //
+
+CREATE PROCEDURE ValidateDataEncoding()
+BEGIN
+  -- Check for problematic characters that might cause CSV issues
+  SELECT 
+    'Encoding Validation' AS validation_type,
+    'Characters requiring CSV escaping' AS issue_type,
+    COUNT(*) AS affected_rows,
+    'Quotes, commas, newlines in page_title' AS description
+  FROM sass_page_clean 
+  WHERE page_title LIKE '%"%' 
+     OR page_title LIKE '%,%' 
+     OR page_title LIKE '%\n%' 
+     OR page_title LIKE '%\r%'
+  
+  UNION ALL
+  
+  SELECT 
+    'Encoding Validation',
+    'Non-ASCII characters',
+    COUNT(*),
+    'Unicode characters in page_title'
+  FROM sass_page_clean 
+  WHERE page_title REGEXP '[^\x00-\x7F]'
+  
+  UNION ALL
+  
+  SELECT 
+    'Encoding Validation',
+    'Very long titles',
+    COUNT(*),
+    'Titles approaching VARCHAR(255) limit'
+  FROM sass_page_clean 
+  WHERE LENGTH(page_title) > 240;
+  
+  -- Sample problematic titles
+  SELECT 
+    'Sample Problematic Titles' AS sample_type,
+    page_id,
+    page_title,
+    LENGTH(page_title) AS title_length,
+    'Contains CSV special chars' AS issue
+  FROM sass_page_clean 
+  WHERE (page_title LIKE '%"%' OR page_title LIKE '%,%' OR page_title LIKE '%\n%')
+  LIMIT 10;
+
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- POSTGRESQL SCRIPT GENERATION
+-- ========================================
+
+-- Generate PostgreSQL table creation script
+DROP PROCEDURE IF EXISTS GeneratePostgreSQLTableScript;
+
+DELIMITER //
+
+CREATE PROCEDURE GeneratePostgreSQLTableScript()
+BEGIN
+  SELECT '-- PostgreSQL Table Creation (No Indices)' AS script_section
+  UNION ALL
+  SELECT 'DROP TABLE IF EXISTS sass_page_clean;'
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT 'CREATE TABLE sass_page_clean ('
+  UNION ALL
+  SELECT '  page_id BIGINT NOT NULL,'
+  UNION ALL
+  SELECT '  page_title VARCHAR(255) NOT NULL,'
+  UNION ALL
+  SELECT '  page_parent_id INTEGER NOT NULL,'
+  UNION ALL
+  SELECT '  page_root_id INTEGER NOT NULL,'
+  UNION ALL
+  SELECT '  page_dag_level INTEGER NOT NULL,'
+  UNION ALL
+  SELECT '  page_is_leaf BOOLEAN NOT NULL DEFAULT FALSE'
+  UNION ALL
+  SELECT ');'
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT '-- Data Import Commands'
+  UNION ALL
+  SELECT "\\COPY sass_page_clean FROM '/path/to/sass_page_clean_subset_1_0pct.csv' WITH (FORMAT CSV, ENCODING 'UTF8');"
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT '-- For chunked import, repeat for each chunk:'
+  UNION ALL
+  SELECT "-- \\COPY sass_page_clean FROM '/path/to/sass_page_clean_chunk_0001.csv' WITH (FORMAT CSV, ENCODING 'UTF8');"
+  UNION ALL
+  SELECT "-- \\COPY sass_page_clean FROM '/path/to/sass_page_clean_chunk_0002.csv' WITH (FORMAT CSV, ENCODING 'UTF8');"
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT '-- Post-Load Index Creation'
+  UNION ALL
+  SELECT 'CREATE UNIQUE INDEX CONCURRENTLY idx_sass_page_clean_pkey ON sass_page_clean (page_id);'
+  UNION ALL
+  SELECT 'ALTER TABLE sass_page_clean ADD CONSTRAINT sass_page_clean_pkey PRIMARY KEY USING INDEX idx_sass_page_clean_pkey;'
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT 'CREATE INDEX CONCURRENTLY idx_sass_page_clean_title ON sass_page_clean (page_title);'
+  UNION ALL
+  SELECT 'CREATE INDEX CONCURRENTLY idx_sass_page_clean_parent ON sass_page_clean (page_parent_id);'
+  UNION ALL
+  SELECT 'CREATE INDEX CONCURRENTLY idx_sass_page_clean_root ON sass_page_clean (page_root_id);'
+  UNION ALL
+  SELECT 'CREATE INDEX CONCURRENTLY idx_sass_page_clean_level ON sass_page_clean (page_dag_level);'
+  UNION ALL
+  SELECT 'CREATE INDEX CONCURRENTLY idx_sass_page_clean_leaf ON sass_page_clean (page_is_leaf);'
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT '-- Validation Queries'
+  UNION ALL
+  SELECT 'SELECT COUNT(*) as total_rows FROM sass_page_clean;'
+  UNION ALL
+  SELECT 'SELECT page_dag_level, COUNT(*) as level_count FROM sass_page_clean GROUP BY page_dag_level ORDER BY page_dag_level;'
+  UNION ALL
+  SELECT 'SELECT page_is_leaf, COUNT(*) as leaf_count FROM sass_page_clean GROUP BY page_is_leaf;';
+
+END//
+
+DELIMITER ;
+
+-- Generate chunk-specific PostgreSQL import script
+DROP PROCEDURE IF EXISTS GeneratePostgreSQLImportScript;
+
+DELIMITER //
+
+CREATE PROCEDURE GeneratePostgreSQLImportScript(
+  IN p_import_path VARCHAR(1000)
+)
+BEGIN
+  DECLARE v_chunk_count INT DEFAULT 0;
+  DECLARE v_current_chunk INT DEFAULT 1;
+  
+  -- Get chunk count
+  SELECT COUNT(*) INTO v_chunk_count
+  FROM export_file_validation 
+  WHERE file_name LIKE 'sass_page_clean_chunk_%';
+  
+  -- Header
+  SELECT '-- PostgreSQL Import Script for Chunked Files' AS import_script
+  UNION ALL
+  SELECT CONCAT('-- Total chunks to import: ', v_chunk_count)
+  UNION ALL
+  SELECT CONCAT('-- Import path: ', COALESCE(p_import_path, '/path/to/export/files/'))
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT '-- Start transaction'
+  UNION ALL
+  SELECT 'BEGIN;'
+  UNION ALL
+  SELECT '';
+  
+  -- Generate COPY commands for each chunk
+  WHILE v_current_chunk <= v_chunk_count DO
+    SELECT CONCAT('\\COPY sass_page_clean FROM ''', 
+                  COALESCE(p_import_path, '/path/to/export/files/'), 
+                  'sass_page_clean_chunk_', LPAD(v_current_chunk, 4, '0'), 
+                  '.csv'' WITH (FORMAT CSV, ENCODING ''UTF8'');') AS import_command;
+    
+    SET v_current_chunk = v_current_chunk + 1;
+  END WHILE;
+  
+  -- Footer
+  SELECT ''
+  UNION ALL
+  SELECT '-- Commit transaction'
+  UNION ALL
+  SELECT 'COMMIT;'
+  UNION ALL
+  SELECT ''
+  UNION ALL
+  SELECT '-- Verify import'
+  UNION ALL
+  SELECT 'SELECT COUNT(*) as imported_rows FROM sass_page_clean;';
+
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- USAGE EXAMPLES AND DOCUMENTATION
 -- ========================================
 
 /*
