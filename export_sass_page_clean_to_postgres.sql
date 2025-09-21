@@ -812,37 +812,70 @@ DELIMITER ;
 -- ========================================
 
 /*
--- TROUBLESHOOTING WORKFLOW
+-- PRODUCTION EXPORT WORKFLOW
 
 -- Step 1: Diagnose environment
 CALL DiagnoseExportEnvironment();
 
--- Step 2: Try string-based export (always works)
-CALL ExportSASSPageCleanToString(1.0, 50);
-
--- Step 3: Try secure file export
+-- Step 2: Test with 1% sample export
 CALL ExportSASSPageCleanSecure(1.0, 1);
 
--- Step 4: Create memory-based export table
-CALL CreateExportTable(1.0);
+-- Step 3: Full chunked export (recommended for production)
+CALL ExportSASSPageCleanChunkedFixed('/private/tmp/mysql_export/', 1000000, 1);
 
--- Step 5: Manual export from export table
+-- Step 4: Validate export integrity
+CALL ValidateExportIntegrity();
+
+-- Step 5: Generate PostgreSQL import scripts
+CALL GeneratePostgreSQLTableScript();
+CALL GeneratePostgreSQLImportScript('/path/to/export/files/');
+
+-- ALTERNATIVE METHODS (if file exports fail)
+
+-- String-based export (manual copy-paste)
+CALL ExportSASSPageCleanToString(1.0, 100);
+
+-- Memory-based export table
+CALL CreateExportTable(1.0);
 SELECT * FROM sass_page_clean_export ORDER BY export_order;
 
--- Step 6: Check export status
+-- Check export status
 SELECT * FROM postgres_export_state ORDER BY updated_at DESC;
 
--- Alternative: Use mysqldump (if file exports fail)
--- mysqldump --tab=/tmp/ --fields-terminated-by=, --fields-optionally-enclosed-by=\" database sass_page_clean_export
+-- POSTGRESQL IMPORT PROCESS
 
--- PostgreSQL import from string output:
--- 1. Copy CSV data from ExportSASSPageCleanToString() output
--- 2. Save to file: sass_page_clean_sample.csv
--- 3. Import: \COPY sass_page_clean FROM 'sass_page_clean_sample.csv' WITH (FORMAT CSV, HEADER);
+-- 1. Create table (without indices for faster import)
+DROP TABLE IF EXISTS sass_page_clean;
+CREATE TABLE sass_page_clean (
+  page_id BIGINT NOT NULL,
+  page_title VARCHAR(255) NOT NULL,
+  page_parent_id INTEGER NOT NULL,
+  page_root_id INTEGER NOT NULL,
+  page_dag_level INTEGER NOT NULL,
+  page_is_leaf BOOLEAN NOT NULL DEFAULT FALSE
+);
 
-COMMON SOLUTIONS:
-1. secure_file_priv = NULL: File exports disabled in MySQL config
-2. Permission denied: Directory not writable by MySQL user
-3. Path not found: Directory doesn't exist
-4. Use CreateExportTable() + manual CSV export as fallback
+-- 2. Import data (repeat for each chunk file)
+\COPY sass_page_clean FROM '/path/to/sass_page_clean_chunk_0001.csv' WITH (FORMAT CSV, ENCODING 'UTF8');
+\COPY sass_page_clean FROM '/path/to/sass_page_clean_chunk_0002.csv' WITH (FORMAT CSV, ENCODING 'UTF8');
+
+-- 3. Create indices after import
+CREATE UNIQUE INDEX CONCURRENTLY idx_sass_page_clean_pkey ON sass_page_clean (page_id);
+ALTER TABLE sass_page_clean ADD CONSTRAINT sass_page_clean_pkey PRIMARY KEY USING INDEX idx_sass_page_clean_pkey;
+CREATE INDEX CONCURRENTLY idx_sass_page_clean_title ON sass_page_clean (page_title);
+CREATE INDEX CONCURRENTLY idx_sass_page_clean_parent ON sass_page_clean (page_parent_id);
+CREATE INDEX CONCURRENTLY idx_sass_page_clean_root ON sass_page_clean (page_root_id);
+CREATE INDEX CONCURRENTLY idx_sass_page_clean_level ON sass_page_clean (page_dag_level);
+CREATE INDEX CONCURRENTLY idx_sass_page_clean_leaf ON sass_page_clean (page_is_leaf);
+
+-- 4. Validate import
+SELECT COUNT(*) as total_rows FROM sass_page_clean;
+SELECT page_dag_level, COUNT(*) as level_count FROM sass_page_clean GROUP BY page_dag_level ORDER BY page_dag_level;
+SELECT page_is_leaf, COUNT(*) as leaf_count FROM sass_page_clean GROUP BY page_is_leaf;
+
+PERFORMANCE NOTES:
+- Full export: ~9.4M rows in 10-15 chunks of 1M rows each
+- Expected export time: 5-10 minutes depending on hardware
+- PostgreSQL import: Use \COPY for best performance
+- Create indices AFTER data import for speed
 */
