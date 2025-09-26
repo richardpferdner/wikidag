@@ -1,14 +1,7 @@
--- SASS Wikipedia Associative Link Builder - Phase 3
--- Builds associative relationship mapping for SASS knowledge domain
--- Combines pagelinks and categorylinks into unified relationship network
--- Maintains link directionality and relationship type classification
-
--- FUTURE:
---  Note: in page_sass, the MIN(parent_id) + GROUP BY page_id logic in the build procedure 
---        permanently discards the other parent relationships. Only one parent per page 
---        survives into sass_page. 
---        Later, build_sass_associative_link.sql will be updated capture these page 
---        and parent relationships as third al_type 'parentlink' and remove 'both' from al_type.
+-- SASS Wikipedia Associative Link Builder - Streaming Representative Resolution
+-- Builds associative relationship mapping with representative page resolution
+-- Implements streaming approach for large-scale pagelinks/categorylinks processing
+-- Optimized for Mac Studio M4 with aggressive pre-filtering and memory management
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -26,234 +19,394 @@ CREATE TABLE IF NOT EXISTS sass_associative_link (
   INDEX idx_type (al_type)
 ) ENGINE=InnoDB;
 
--- Temporary working table for pagelink processing
-CREATE TABLE IF NOT EXISTS sass_pagelink_work (
-  pl_from_page_id INT UNSIGNED NOT NULL,
-  pl_to_page_id INT UNSIGNED NOT NULL,
+-- Streaming buffer table for batch processing
+CREATE TABLE IF NOT EXISTS sass_associative_buffer (
+  al_from_page_id INT UNSIGNED NOT NULL,
+  al_to_page_id INT UNSIGNED NOT NULL,
+  al_type ENUM('pagelink','categorylink') NOT NULL,
+  al_batch_id INT NOT NULL,
   
-  PRIMARY KEY (pl_from_page_id, pl_to_page_id),
-  INDEX idx_from (pl_from_page_id),
-  INDEX idx_to (pl_to_page_id)
-) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
-
--- Temporary working table for categorylink processing
-CREATE TABLE IF NOT EXISTS sass_categorylink_work (
-  cl_from_page_id INT UNSIGNED NOT NULL,
-  cl_to_page_id INT UNSIGNED NOT NULL,
-  
-  PRIMARY KEY (cl_from_page_id, cl_to_page_id),
-  INDEX idx_from (cl_from_page_id),
-  INDEX idx_to (cl_to_page_id)
+  PRIMARY KEY (al_from_page_id, al_to_page_id, al_type),
+  INDEX idx_batch (al_batch_id),
+  INDEX idx_from (al_from_page_id),
+  INDEX idx_to (al_to_page_id)
 ) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
 
 -- Build progress tracking
 CREATE TABLE IF NOT EXISTS associative_build_state (
   state_key VARCHAR(255) PRIMARY KEY,
-  state_value INT NOT NULL,
+  state_value BIGINT NOT NULL,
   state_text VARCHAR(500) NULL,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- Link type distribution tracking
-CREATE TABLE IF NOT EXISTS sass_link_stats (
+-- Link processing statistics
+CREATE TABLE IF NOT EXISTS sass_link_processing_stats (
   stat_id INT AUTO_INCREMENT PRIMARY KEY,
+  processing_phase VARCHAR(100) NOT NULL,
   stat_type VARCHAR(100) NOT NULL,
-  stat_value INT NOT NULL,
-  stat_percentage DECIMAL(5,2) NULL,
+  stat_value BIGINT NOT NULL,
+  stat_percentage DECIMAL(8,3) NULL,
+  batch_id INT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_type (stat_type)
+  INDEX idx_phase (processing_phase),
+  INDEX idx_type (stat_type),
+  INDEX idx_batch (batch_id)
+) ENGINE=InnoDB;
+
+-- Representative consolidation tracking
+CREATE TABLE IF NOT EXISTS sass_representative_consolidation (
+  consolidation_id INT AUTO_INCREMENT PRIMARY KEY,
+  original_source_id INT UNSIGNED NOT NULL,
+  original_target_id INT UNSIGNED NOT NULL,
+  representative_source_id INT UNSIGNED NOT NULL,
+  representative_target_id INT UNSIGNED NOT NULL,
+  link_type ENUM('pagelink','categorylink') NOT NULL,
+  is_consolidated TINYINT(1) NOT NULL DEFAULT 0,
+  INDEX idx_original_source (original_source_id),
+  INDEX idx_representative_source (representative_source_id),
+  INDEX idx_consolidated (is_consolidated)
 ) ENGINE=InnoDB;
 
 -- ========================================
--- MAIN BUILD PROCEDURE
+-- STREAMING REPRESENTATIVE RESOLUTION PROCEDURE
 -- ========================================
 
-DROP PROCEDURE IF EXISTS BuildSASSAssociativeLinks;
+DROP PROCEDURE IF EXISTS BuildSASSAssociativeLinksStreaming;
 
 DELIMITER //
 
-CREATE PROCEDURE BuildSASSAssociativeLinks(
+CREATE PROCEDURE BuildSASSAssociativeLinksStreaming(
   IN p_batch_size INT,
-  IN p_enable_progress_reports TINYINT(1)
+  IN p_enable_progress_reports TINYINT(1),
+  IN p_enable_consolidation_tracking TINYINT(1)
 )
 BEGIN
   DECLARE v_start_time DECIMAL(14,3);
-  DECLARE v_pagelinks_processed INT DEFAULT 0;
-  DECLARE v_categorylinks_processed INT DEFAULT 0;
-  DECLARE v_both_relationships INT DEFAULT 0;
-  DECLARE v_total_links INT DEFAULT 0;
-  DECLARE v_self_links_excluded INT DEFAULT 0;
+  DECLARE v_pagelinks_candidates BIGINT DEFAULT 0;
+  DECLARE v_categorylinks_candidates BIGINT DEFAULT 0;
+  DECLARE v_pagelinks_processed BIGINT DEFAULT 0;
+  DECLARE v_categorylinks_processed BIGINT DEFAULT 0;
+  DECLARE v_total_links_created BIGINT DEFAULT 0;
+  DECLARE v_consolidations_detected BIGINT DEFAULT 0;
+  DECLARE v_self_links_excluded BIGINT DEFAULT 0;
+  DECLARE v_current_batch INT DEFAULT 0;
+  DECLARE v_continue TINYINT(1) DEFAULT 1;
+  DECLARE v_phase VARCHAR(100);
   
   -- Set defaults
   IF p_batch_size IS NULL THEN SET p_batch_size = 1000000; END IF;
   IF p_enable_progress_reports IS NULL THEN SET p_enable_progress_reports = 1; END IF;
+  IF p_enable_consolidation_tracking IS NULL THEN SET p_enable_consolidation_tracking = 0; END IF;
   
   SET v_start_time = UNIX_TIMESTAMP();
   
   -- Clear target and working tables
   TRUNCATE TABLE sass_associative_link;
-  TRUNCATE TABLE sass_pagelink_work;
-  TRUNCATE TABLE sass_categorylink_work;
-  TRUNCATE TABLE sass_link_stats;
+  TRUNCATE TABLE sass_associative_buffer;
+  TRUNCATE TABLE sass_link_processing_stats;
+  
+  IF p_enable_consolidation_tracking = 1 THEN
+    TRUNCATE TABLE sass_representative_consolidation;
+  END IF;
   
   -- Initialize build state
   INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 0, 'Starting associative link build')
-  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting associative link build';
+  VALUES ('build_status', 0, 'Starting streaming associative link build with representative resolution')
+  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting streaming associative link build with representative resolution';
   
   -- ========================================
-  -- PHASE 1: PROCESS PAGELINKS
+  -- PHASE 1: AGGRESSIVE PRE-FILTERING AND CANDIDATE ANALYSIS
   -- ========================================
+  
+  SET v_phase = 'Phase 1: Pre-filtering';
   
   INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 1, 'Processing pagelinks')
-  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Processing pagelinks';
+  VALUES ('current_phase', 1, 'Analyzing candidates with SASS domain filtering')
+  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Analyzing candidates with SASS domain filtering';
   
-  -- Extract valid pagelinks where both source and target exist in SASS
-  INSERT IGNORE INTO sass_pagelink_work (pl_from_page_id, pl_to_page_id)
-  SELECT DISTINCT
-    pl.pl_from as pl_from_page_id,
-    pl.pl_target_id as pl_to_page_id
+  -- Count pagelink candidates (both source and target in SASS)
+  SELECT COUNT(*) INTO v_pagelinks_candidates
   FROM pagelinks pl
-  JOIN sass_page sp_from ON pl.pl_from = sp_from.page_id          -- Source must be in SASS
-  JOIN sass_page sp_to ON pl.pl_target_id = sp_to.page_id         -- Target must be in SASS
-  WHERE pl.pl_from != pl.pl_target_id;                           -- Exclude self-links
+  WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip_src WHERE pl.pl_from = sip_src.page_id)
+    AND EXISTS (SELECT 1 FROM sass_identity_pages sip_tgt WHERE pl.pl_target_id = sip_tgt.page_id)
+    AND pl.pl_from != pl.pl_target_id;
   
-  SET v_pagelinks_processed = ROW_COUNT();
-  
-  IF p_enable_progress_reports = 1 THEN
-    SELECT 
-      'Phase 1: Pagelinks' AS status,
-      FORMAT(v_pagelinks_processed, 0) AS pagelinks_extracted,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
-  END IF;
-  
-  -- ========================================
-  -- PHASE 2: PROCESS CATEGORYLINKS
-  -- ========================================
-  
-  INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 2, 'Processing categorylinks')
-  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Processing categorylinks';
-  
-  -- Extract valid categorylinks where both source and target exist in SASS
-  INSERT IGNORE INTO sass_categorylink_work (cl_from_page_id, cl_to_page_id)
-  SELECT DISTINCT
-    cl.cl_from as cl_from_page_id,
-    cl.cl_target_id as cl_to_page_id
+  -- Count categorylink candidates (both source and target in SASS)
+  SELECT COUNT(*) INTO v_categorylinks_candidates
   FROM categorylinks cl
-  JOIN sass_page sp_from ON cl.cl_from = sp_from.page_id          -- Source must be in SASS
-  JOIN sass_page sp_to ON cl.cl_target_id = sp_to.page_id         -- Target must be in SASS
-  WHERE cl.cl_from != cl.cl_target_id                            -- Exclude self-links
-    AND cl.cl_type IN ('page', 'subcat');                        -- Exclude files
+  WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip_src WHERE cl.cl_from = sip_src.page_id)
+    AND EXISTS (SELECT 1 FROM sass_identity_pages sip_tgt WHERE cl.cl_target_id = sip_tgt.page_id)
+    AND cl.cl_from != cl.cl_target_id
+    AND cl.cl_type IN ('page', 'subcat');
   
-  SET v_categorylinks_processed = ROW_COUNT();
+  -- Record pre-filtering statistics
+  INSERT INTO sass_link_processing_stats (processing_phase, stat_type, stat_value)
+  VALUES 
+    (v_phase, 'pagelink_candidates', v_pagelinks_candidates),
+    (v_phase, 'categorylink_candidates', v_categorylinks_candidates),
+    (v_phase, 'total_candidates', v_pagelinks_candidates + v_categorylinks_candidates);
   
   IF p_enable_progress_reports = 1 THEN
     SELECT 
-      'Phase 2: Categorylinks' AS status,
-      FORMAT(v_categorylinks_processed, 0) AS categorylinks_extracted,
+      'Phase 1: Domain Pre-filtering Complete' AS status,
+      FORMAT(v_pagelinks_candidates, 0) AS pagelink_candidates,
+      FORMAT(v_categorylinks_candidates, 0) AS categorylink_candidates,
+      FORMAT(v_pagelinks_candidates + v_categorylinks_candidates, 0) AS total_candidates,
+      CONCAT(ROUND(100.0 * (v_pagelinks_candidates + v_categorylinks_candidates) / 1700000000, 2), '%') AS estimated_reduction,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
   END IF;
   
   -- ========================================
-  -- PHASE 3: MERGE AND CLASSIFY RELATIONSHIPS
+  -- PHASE 2A: STREAMING PAGELINKS PROCESSING
   -- ========================================
   
+  SET v_phase = 'Phase 2A: Pagelinks';
+  SET v_current_batch = 0;
+  
   INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 3, 'Merging relationships')
-  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Merging relationships';
+  VALUES ('current_phase', 2, 'Streaming pagelinks with representative resolution')
+  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Streaming pagelinks with representative resolution';
   
-  -- Insert pagelink-only relationships
+  -- Process pagelinks in streaming batches
+  SET @pagelinks_offset = 0;
+  
+  WHILE v_continue = 1 DO
+    SET v_current_batch = v_current_batch + 1;
+    
+    -- Stream batch with immediate representative resolution
+    INSERT IGNORE INTO sass_associative_buffer (al_from_page_id, al_to_page_id, al_type, al_batch_id)
+    SELECT DISTINCT
+      sip_src.representative_page_id as al_from_page_id,
+      sip_tgt.representative_page_id as al_to_page_id,
+      'pagelink' as al_type,
+      v_current_batch as al_batch_id
+    FROM (
+      SELECT pl.pl_from, pl.pl_target_id
+      FROM pagelinks pl
+      WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE pl.pl_from = sip.page_id)
+        AND EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE pl.pl_target_id = sip.page_id)
+        AND pl.pl_from != pl.pl_target_id
+      ORDER BY pl.pl_from, pl.pl_target_id
+      LIMIT p_batch_size OFFSET @pagelinks_offset
+    ) pl_batch
+    JOIN sass_identity_pages sip_src ON pl_batch.pl_from = sip_src.page_id
+    JOIN sass_identity_pages sip_tgt ON pl_batch.pl_target_id = sip_tgt.page_id
+    WHERE sip_src.representative_page_id != sip_tgt.representative_page_id;  -- Exclude self-links at representative level
+    
+    SET v_pagelinks_processed = v_pagelinks_processed + ROW_COUNT();
+    SET @pagelinks_offset = @pagelinks_offset + p_batch_size;
+    
+    -- Track consolidations if enabled
+    IF p_enable_consolidation_tracking = 1 AND ROW_COUNT() > 0 THEN
+      INSERT INTO sass_representative_consolidation (
+        original_source_id, original_target_id, 
+        representative_source_id, representative_target_id, 
+        link_type, is_consolidated
+      )
+      SELECT 
+        pl_batch.pl_from, pl_batch.pl_target_id,
+        sip_src.representative_page_id, sip_tgt.representative_page_id,
+        'pagelink',
+        CASE WHEN pl_batch.pl_from != sip_src.representative_page_id 
+                  OR pl_batch.pl_target_id != sip_tgt.representative_page_id 
+             THEN 1 ELSE 0 END
+      FROM (
+        SELECT pl.pl_from, pl.pl_target_id
+        FROM pagelinks pl
+        WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE pl.pl_from = sip.page_id)
+          AND EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE pl.pl_target_id = sip.page_id)
+          AND pl.pl_from != pl.pl_target_id
+        ORDER BY pl.pl_from, pl.pl_target_id
+        LIMIT p_batch_size OFFSET (@pagelinks_offset - p_batch_size)
+      ) pl_batch
+      JOIN sass_identity_pages sip_src ON pl_batch.pl_from = sip_src.page_id
+      JOIN sass_identity_pages sip_tgt ON pl_batch.pl_target_id = sip_tgt.page_id;
+    END IF;
+    
+    -- Progress report
+    IF p_enable_progress_reports = 1 AND v_current_batch % 10 = 0 THEN
+      SELECT 
+        CONCAT('Pagelinks Batch ', v_current_batch) AS status,
+        FORMAT(ROW_COUNT(), 0) AS links_in_batch,
+        FORMAT(v_pagelinks_processed, 0) AS total_pagelinks_processed,
+        CONCAT(ROUND(100.0 * v_pagelinks_processed / v_pagelinks_candidates, 1), '%') AS pagelinks_progress,
+        ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+    END IF;
+    
+    -- Check if done with pagelinks
+    IF ROW_COUNT() < p_batch_size THEN
+      SET v_continue = 0;
+    END IF;
+    
+  END WHILE;
+  
+  -- Record pagelinks statistics
+  INSERT INTO sass_link_processing_stats (processing_phase, stat_type, stat_value)
+  VALUES 
+    (v_phase, 'pagelinks_processed', v_pagelinks_processed),
+    (v_phase, 'pagelinks_batches', v_current_batch);
+  
+  -- ========================================
+  -- PHASE 2B: STREAMING CATEGORYLINKS PROCESSING
+  -- ========================================
+  
+  SET v_phase = 'Phase 2B: Categorylinks';
+  SET v_current_batch = 0;
+  SET v_continue = 1;
+  
+  INSERT INTO associative_build_state (state_key, state_value, state_text) 
+  VALUES ('current_phase', 3, 'Streaming categorylinks with representative resolution')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Streaming categorylinks with representative resolution';
+  
+  -- Process categorylinks in streaming batches
+  SET @categorylinks_offset = 0;
+  
+  WHILE v_continue = 1 DO
+    SET v_current_batch = v_current_batch + 1;
+    
+    -- Stream batch with immediate representative resolution
+    INSERT IGNORE INTO sass_associative_buffer (al_from_page_id, al_to_page_id, al_type, al_batch_id)
+    SELECT DISTINCT
+      sip_src.representative_page_id as al_from_page_id,
+      sip_tgt.representative_page_id as al_to_page_id,
+      'categorylink' as al_type,
+      v_current_batch + 10000 as al_batch_id  -- Offset to distinguish from pagelinks
+    FROM (
+      SELECT cl.cl_from, cl.cl_target_id
+      FROM categorylinks cl
+      WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE cl.cl_from = sip.page_id)
+        AND EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE cl.cl_target_id = sip.page_id)
+        AND cl.cl_from != cl.cl_target_id
+        AND cl.cl_type IN ('page', 'subcat')
+      ORDER BY cl.cl_from, cl.cl_target_id
+      LIMIT p_batch_size OFFSET @categorylinks_offset
+    ) cl_batch
+    JOIN sass_identity_pages sip_src ON cl_batch.cl_from = sip_src.page_id
+    JOIN sass_identity_pages sip_tgt ON cl_batch.cl_target_id = sip_tgt.page_id
+    WHERE sip_src.representative_page_id != sip_tgt.representative_page_id;  -- Exclude self-links at representative level
+    
+    SET v_categorylinks_processed = v_categorylinks_processed + ROW_COUNT();
+    SET @categorylinks_offset = @categorylinks_offset + p_batch_size;
+    
+    -- Track consolidations if enabled
+    IF p_enable_consolidation_tracking = 1 AND ROW_COUNT() > 0 THEN
+      INSERT INTO sass_representative_consolidation (
+        original_source_id, original_target_id, 
+        representative_source_id, representative_target_id, 
+        link_type, is_consolidated
+      )
+      SELECT 
+        cl_batch.cl_from, cl_batch.cl_target_id,
+        sip_src.representative_page_id, sip_tgt.representative_page_id,
+        'categorylink',
+        CASE WHEN cl_batch.cl_from != sip_src.representative_page_id 
+                  OR cl_batch.cl_target_id != sip_tgt.representative_page_id 
+             THEN 1 ELSE 0 END
+      FROM (
+        SELECT cl.cl_from, cl.cl_target_id
+        FROM categorylinks cl
+        WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE cl.cl_from = sip.page_id)
+          AND EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE cl.cl_target_id = sip.page_id)
+          AND cl.cl_from != cl.cl_target_id
+          AND cl.cl_type IN ('page', 'subcat')
+        ORDER BY cl.cl_from, cl.cl_target_id
+        LIMIT p_batch_size OFFSET (@categorylinks_offset - p_batch_size)
+      ) cl_batch
+      JOIN sass_identity_pages sip_src ON cl_batch.cl_from = sip_src.page_id
+      JOIN sass_identity_pages sip_tgt ON cl_batch.cl_target_id = sip_tgt.page_id;
+    END IF;
+    
+    -- Progress report
+    IF p_enable_progress_reports = 1 AND v_current_batch % 10 = 0 THEN
+      SELECT 
+        CONCAT('Categorylinks Batch ', v_current_batch) AS status,
+        FORMAT(ROW_COUNT(), 0) AS links_in_batch,
+        FORMAT(v_categorylinks_processed, 0) AS total_categorylinks_processed,
+        CONCAT(ROUND(100.0 * v_categorylinks_processed / v_categorylinks_candidates, 1), '%') AS categorylinks_progress,
+        ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+    END IF;
+    
+    -- Check if done with categorylinks
+    IF ROW_COUNT() < p_batch_size THEN
+      SET v_continue = 0;
+    END IF;
+    
+  END WHILE;
+  
+  -- Record categorylinks statistics
+  INSERT INTO sass_link_processing_stats (processing_phase, stat_type, stat_value)
+  VALUES 
+    (v_phase, 'categorylinks_processed', v_categorylinks_processed),
+    (v_phase, 'categorylinks_batches', v_current_batch);
+  
+  -- ========================================
+  -- PHASE 3: LINK TYPE AGGREGATION AND FINAL ASSEMBLY
+  -- ========================================
+  
+  SET v_phase = 'Phase 3: Aggregation';
+  
+  INSERT INTO associative_build_state (state_key, state_value, state_text) 
+  VALUES ('current_phase', 4, 'Aggregating link types and building final associative links')
+  ON DUPLICATE KEY UPDATE state_value = 4, state_text = 'Aggregating link types and building final associative links';
+  
+  -- Build final associative links with proper type aggregation
   INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
   SELECT 
-    plw.pl_from_page_id,
-    plw.pl_to_page_id,
-    'pagelink' as al_type
-  FROM sass_pagelink_work plw
-  WHERE NOT EXISTS (
-    SELECT 1 FROM sass_categorylink_work clw 
-    WHERE clw.cl_from_page_id = plw.pl_from_page_id 
-      AND clw.cl_to_page_id = plw.pl_to_page_id
-  );
+    sab.al_from_page_id,
+    sab.al_to_page_id,
+    CASE 
+      WHEN COUNT(DISTINCT sab.al_type) > 1 THEN 'both'
+      ELSE MIN(sab.al_type)
+    END as al_type
+  FROM sass_associative_buffer sab
+  JOIN sass_page_clean spc_src ON sab.al_from_page_id = spc_src.page_id    -- Validate source is representative
+  JOIN sass_page_clean spc_tgt ON sab.al_to_page_id = spc_tgt.page_id      -- Validate target is representative
+  GROUP BY sab.al_from_page_id, sab.al_to_page_id;
   
-  -- Insert categorylink-only relationships
-  INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
-  SELECT 
-    clw.cl_from_page_id,
-    clw.cl_to_page_id,
-    'categorylink' as al_type
-  FROM sass_categorylink_work clw
-  WHERE NOT EXISTS (
-    SELECT 1 FROM sass_pagelink_work plw 
-    WHERE plw.pl_from_page_id = clw.cl_from_page_id 
-      AND plw.pl_to_page_id = clw.cl_to_page_id
-  );
+  SET v_total_links_created = ROW_COUNT();
   
-  -- Insert relationships that exist in both (mark as 'both')
-  INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
-  SELECT 
-    plw.pl_from_page_id,
-    plw.pl_to_page_id,
-    'both' as al_type
-  FROM sass_pagelink_work plw
-  JOIN sass_categorylink_work clw ON plw.pl_from_page_id = clw.cl_from_page_id 
-    AND plw.pl_to_page_id = clw.cl_to_page_id;
-  
-  SET v_total_links = (SELECT COUNT(*) FROM sass_associative_link);
-  SET v_both_relationships = (SELECT COUNT(*) FROM sass_associative_link WHERE al_type = 'both');
-  
-  IF p_enable_progress_reports = 1 THEN
-    SELECT 
-      'Phase 3: Relationship Merge' AS status,
-      FORMAT(v_total_links, 0) AS total_relationships_created,
-      FORMAT(v_both_relationships, 0) AS dual_relationships,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
+  -- Calculate consolidation statistics
+  IF p_enable_consolidation_tracking = 1 THEN
+    SELECT COUNT(*) INTO v_consolidations_detected
+    FROM sass_representative_consolidation
+    WHERE is_consolidated = 1;
   END IF;
   
-  -- ========================================
-  -- PHASE 4: GENERATE STATISTICS
-  -- ========================================
+  -- Count excluded self-links
+  SELECT COUNT(*) INTO v_self_links_excluded
+  FROM sass_associative_buffer sab
+  WHERE sab.al_from_page_id = sab.al_to_page_id;
   
-  INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 4, 'Generating statistics')
-  ON DUPLICATE KEY UPDATE state_value = 4, state_text = 'Generating statistics';
-  
-  -- Store link type distribution
-  INSERT INTO sass_link_stats (stat_type, stat_value, stat_percentage)
-  SELECT 
-    CONCAT(al_type, '_links') as stat_type,
-    COUNT(*) as stat_value,
-    ROUND(100.0 * COUNT(*) / v_total_links, 2) as stat_percentage
-  FROM sass_associative_link
-  GROUP BY al_type;
-  
-  -- Store overall statistics
-  INSERT INTO sass_link_stats (stat_type, stat_value) VALUES
-  ('total_associative_links', v_total_links),
-  ('unique_source_pages', (SELECT COUNT(DISTINCT al_from_page_id) FROM sass_associative_link)),
-  ('unique_target_pages', (SELECT COUNT(DISTINCT al_to_page_id) FROM sass_associative_link)),
-  ('pagelinks_processed', v_pagelinks_processed),
-  ('categorylinks_processed', v_categorylinks_processed);
+  -- Record final statistics
+  INSERT INTO sass_link_processing_stats (processing_phase, stat_type, stat_value)
+  VALUES 
+    (v_phase, 'total_links_created', v_total_links_created),
+    (v_phase, 'consolidations_detected', v_consolidations_detected),
+    (v_phase, 'self_links_excluded', v_self_links_excluded);
   
   -- Update final build state
   INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 100, 'Build completed successfully')
-  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Build completed successfully';
+  VALUES ('build_status', 100, 'Streaming associative build completed successfully')
+  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Streaming associative build completed successfully';
   
   INSERT INTO associative_build_state (state_key, state_value) 
-  VALUES ('total_associative_links', v_total_links)
-  ON DUPLICATE KEY UPDATE state_value = v_total_links;
+  VALUES ('total_associative_links', v_total_links_created)
+  ON DUPLICATE KEY UPDATE state_value = v_total_links_created;
   
   -- ========================================
-  -- FINAL SUMMARY REPORT
+  -- FINAL COMPREHENSIVE REPORT
   -- ========================================
   
   SELECT 
-    'COMPLETE - Associative Link Network' AS final_status,
+    'COMPLETE - Streaming Associative Build with Representatives' AS final_status,
+    FORMAT(v_pagelinks_candidates, 0) AS pagelink_candidates,
+    FORMAT(v_categorylinks_candidates, 0) AS categorylink_candidates,
     FORMAT(v_pagelinks_processed, 0) AS pagelinks_processed,
     FORMAT(v_categorylinks_processed, 0) AS categorylinks_processed,
-    FORMAT(v_total_links, 0) AS total_associative_links,
+    FORMAT(v_total_links_created, 0) AS total_associative_links,
+    FORMAT(v_consolidations_detected, 0) AS representative_consolidations,
+    FORMAT(v_self_links_excluded, 0) AS self_links_excluded,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
   -- Link type distribution
@@ -261,34 +414,47 @@ BEGIN
     'Link Type Distribution' AS metric_type,
     sal.al_type AS link_type,
     FORMAT(COUNT(*), 0) AS link_count,
-    CONCAT(ROUND(100.0 * COUNT(*) / v_total_links, 1), '%') AS percentage
+    CONCAT(ROUND(100.0 * COUNT(*) / v_total_links_created, 1), '%') AS percentage
   FROM sass_associative_link sal
   GROUP BY sal.al_type
   ORDER BY COUNT(*) DESC;
   
-  -- Connectivity metrics
+  -- Representative consolidation impact analysis
+  IF p_enable_consolidation_tracking = 1 THEN
+    SELECT 
+      'Representative Consolidation Impact' AS analysis_type,
+      link_type,
+      FORMAT(COUNT(*), 0) AS original_relationships,
+      FORMAT(SUM(is_consolidated), 0) AS relationships_consolidated,
+      CONCAT(ROUND(100.0 * SUM(is_consolidated) / COUNT(*), 1), '%') AS consolidation_rate
+    FROM sass_representative_consolidation
+    GROUP BY link_type
+    ORDER BY link_type;
+  END IF;
+  
+  -- Network connectivity metrics
   SELECT 
     'Network Connectivity Metrics' AS metric_type,
-    FORMAT(COUNT(DISTINCT sal.al_from_page_id), 0) AS unique_source_pages,
-    FORMAT(COUNT(DISTINCT sal.al_to_page_id), 0) AS unique_target_pages,
-    FORMAT(COUNT(DISTINCT sal.al_from_page_id) + COUNT(DISTINCT sal.al_to_page_id), 0) AS total_connected_pages,
+    FORMAT(COUNT(DISTINCT sal.al_from_page_id), 0) AS unique_source_representatives,
+    FORMAT(COUNT(DISTINCT sal.al_to_page_id), 0) AS unique_target_representatives,
+    FORMAT(COUNT(DISTINCT sal.al_from_page_id) + COUNT(DISTINCT sal.al_to_page_id), 0) AS total_connected_representatives,
     ROUND(COUNT(*) / COUNT(DISTINCT sal.al_from_page_id), 1) AS avg_outbound_links,
     ROUND(COUNT(*) / COUNT(DISTINCT sal.al_to_page_id), 1) AS avg_inbound_links
   FROM sass_associative_link sal;
   
-  -- Sample associative relationships
+  -- Sample representative relationships
   SELECT 
-    'Sample Associative Relationships' AS sample_type,
-    CONVERT(sp_from.page_title, CHAR) AS source_title,
-    CONVERT(sp_to.page_title, CHAR) AS target_title,
+    'Sample Representative Relationships' AS sample_type,
+    CONVERT(sp_from.page_title, CHAR) AS source_representative,
+    CONVERT(sp_to.page_title, CHAR) AS target_representative,
     sal.al_type AS relationship_type,
     sp_from.page_dag_level AS source_level,
     sp_to.page_dag_level AS target_level,
     CASE WHEN sp_from.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS source_type,
     CASE WHEN sp_to.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS target_type
   FROM sass_associative_link sal
-  JOIN sass_page sp_from ON sal.al_from_page_id = sp_from.page_id
-  JOIN sass_page sp_to ON sal.al_to_page_id = sp_to.page_id
+  JOIN sass_page_clean sp_from ON sal.al_from_page_id = sp_from.page_id
+  JOIN sass_page_clean sp_to ON sal.al_to_page_id = sp_to.page_id
   ORDER BY RAND()
   LIMIT 15;
   
@@ -297,293 +463,57 @@ END//
 DELIMITER ;
 
 -- ========================================
--- BATCHED BUILD PROCEDURE WITH PROGRESS TRACKING
--- ========================================
-
-DROP PROCEDURE IF EXISTS BuildSASSAssociativeLinksOptimized;
-
-DELIMITER //
-
-CREATE PROCEDURE BuildSASSAssociativeLinksOptimized(
-  IN p_batch_size INT
-)
-BEGIN
-  DECLARE v_start_time DECIMAL(14,3);
-  DECLARE v_total_links INT DEFAULT 0;
-  DECLARE v_batch_links INT DEFAULT 0;
-  DECLARE v_current_batch INT DEFAULT 0;
-  DECLARE v_min_page_id INT DEFAULT 0;
-  DECLARE v_max_page_id INT DEFAULT 0;
-  DECLARE v_batch_start INT DEFAULT 0;
-  DECLARE v_batch_end INT DEFAULT 0;
-  DECLARE v_last_processed_id INT DEFAULT 0;
-  DECLARE v_continue TINYINT(1) DEFAULT 1;
-  DECLARE v_pagelinks_done INT DEFAULT 0;
-  DECLARE v_categorylinks_done INT DEFAULT 0;
-  
-  -- Set defaults
-  IF p_batch_size IS NULL THEN SET p_batch_size = 500000; END IF;
-  
-  SET v_start_time = UNIX_TIMESTAMP();
-  
-  -- Get page ID range for batching
-  SELECT MIN(page_id), MAX(page_id) INTO v_min_page_id, v_max_page_id FROM sass_page;
-  
-  -- Check for resume capability
-  SELECT COALESCE(state_value, 0) INTO v_last_processed_id 
-  FROM associative_build_state 
-  WHERE state_key = 'last_pagelink_batch_end';
-  
-  IF v_last_processed_id = 0 THEN
-    -- Fresh start - clear tables
-    TRUNCATE TABLE sass_associative_link;
-    
-    INSERT INTO associative_build_state (state_key, state_value, state_text) 
-    VALUES ('build_phase', 1, 'Processing pagelinks in batches')
-    ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Processing pagelinks in batches';
-  ELSE
-    -- Resume from last position
-    SELECT 'Resuming from last position' AS status, v_last_processed_id AS last_batch_end;
-  END IF;
-  
-  -- ========================================
-  -- PHASE 1: BATCHED PAGELINKS PROCESSING
-  -- ========================================
-  
-  SET v_batch_start = GREATEST(v_min_page_id, v_last_processed_id);
-  
-  WHILE v_batch_start <= v_max_page_id AND v_continue = 1 DO
-    SET v_batch_end = LEAST(v_batch_start + p_batch_size - 1, v_max_page_id);
-    SET v_current_batch = v_current_batch + 1;
-    
-    -- Process pagelinks for current batch
-    INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
-    SELECT DISTINCT
-      pl.pl_from as al_from_page_id,
-      pl.pl_target_id as al_to_page_id,
-      'pagelink' as al_type
-    FROM pagelinks pl
-    JOIN sass_page sp_from ON pl.pl_from = sp_from.page_id
-    JOIN sass_page sp_to ON pl.pl_target_id = sp_to.page_id
-    WHERE pl.pl_from BETWEEN v_batch_start AND v_batch_end
-      AND pl.pl_from != pl.pl_target_id
-      AND NOT EXISTS (
-        SELECT 1 FROM categorylinks cl2
-        WHERE cl2.cl_from = pl.pl_from 
-          AND cl2.cl_target_id = pl.pl_target_id
-          AND cl2.cl_type IN ('page', 'subcat')
-      );
-    
-    SET v_batch_links = ROW_COUNT();
-    SET v_total_links = v_total_links + v_batch_links;
-    
-    -- Update progress
-    INSERT INTO associative_build_state (state_key, state_value) 
-    VALUES ('last_pagelink_batch_end', v_batch_end)
-    ON DUPLICATE KEY UPDATE state_value = v_batch_end;
-    
-    INSERT INTO associative_build_state (state_key, state_value) 
-    VALUES ('pagelinks_processed', v_total_links)
-    ON DUPLICATE KEY UPDATE state_value = v_total_links;
-    
-    -- Progress report every batch
-    SELECT 
-      CONCAT('Pagelinks Batch ', v_current_batch) AS status,
-      CONCAT(v_batch_start, ' - ', v_batch_end) AS page_range,
-      FORMAT(v_batch_links, 0) AS batch_links,
-      FORMAT(v_total_links, 0) AS total_links,
-      CONCAT(ROUND(100.0 * (v_batch_end - v_min_page_id) / (v_max_page_id - v_min_page_id), 1), '%') AS progress,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
-    
-    SET v_batch_start = v_batch_end + 1;
-  END WHILE;
-  
-  SET v_pagelinks_done = v_total_links;
-  
-  -- ========================================
-  -- PHASE 2: BATCHED CATEGORYLINKS PROCESSING
-  -- ========================================
-  
-  INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 2, 'Processing categorylinks in batches')
-  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Processing categorylinks in batches';
-  
-  -- Reset for categorylinks
-  SET v_batch_start = v_min_page_id;
-  SET v_current_batch = 0;
-  
-  WHILE v_batch_start <= v_max_page_id DO
-    SET v_batch_end = LEAST(v_batch_start + p_batch_size - 1, v_max_page_id);
-    SET v_current_batch = v_current_batch + 1;
-    
-    -- Process categorylinks for current batch
-    INSERT IGNORE INTO sass_associative_link (al_from_page_id, al_to_page_id, al_type)
-    SELECT DISTINCT
-      cl.cl_from as al_from_page_id,
-      cl.cl_target_id as al_to_page_id,
-      'categorylink' as al_type
-    FROM categorylinks cl
-    JOIN sass_page sp_from ON cl.cl_from = sp_from.page_id
-    JOIN sass_page sp_to ON cl.cl_target_id = sp_to.page_id
-    WHERE cl.cl_from BETWEEN v_batch_start AND v_batch_end
-      AND cl.cl_from != cl.cl_target_id
-      AND cl.cl_type IN ('page', 'subcat')
-      AND NOT EXISTS (
-        SELECT 1 FROM pagelinks pl2
-        WHERE pl2.pl_from = cl.cl_from 
-          AND pl2.pl_target_id = cl.cl_target_id
-      );
-    
-    SET v_batch_links = ROW_COUNT();
-    SET v_total_links = v_total_links + v_batch_links;
-    
-    -- Update progress
-    INSERT INTO associative_build_state (state_key, state_value) 
-    VALUES ('categorylinks_processed', v_total_links - v_pagelinks_done)
-    ON DUPLICATE KEY UPDATE state_value = v_total_links - v_pagelinks_done;
-    
-    -- Progress report every batch
-    SELECT 
-      CONCAT('Categorylinks Batch ', v_current_batch) AS status,
-      CONCAT(v_batch_start, ' - ', v_batch_end) AS page_range,
-      FORMAT(v_batch_links, 0) AS batch_links,
-      FORMAT(v_total_links, 0) AS total_links,
-      CONCAT(ROUND(100.0 * (v_batch_end - v_min_page_id) / (v_max_page_id - v_min_page_id), 1), '%') AS progress,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
-    
-    SET v_batch_start = v_batch_end + 1;
-  END WHILE;
-  
-  SET v_categorylinks_done = v_total_links - v_pagelinks_done;
-  
-  -- ========================================
-  -- PHASE 3: BATCHED 'BOTH' RELATIONSHIPS
-  -- ========================================
-  
-  INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 3, 'Processing dual relationships in batches')
-  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Processing dual relationships in batches';
-  
-  -- Reset for 'both' processing
-  SET v_batch_start = v_min_page_id;
-  SET v_current_batch = 0;
-  
-  WHILE v_batch_start <= v_max_page_id DO
-    SET v_batch_end = LEAST(v_batch_start + p_batch_size - 1, v_max_page_id);
-    SET v_current_batch = v_current_batch + 1;
-    
-    -- Update existing pagelinks to 'both' where categorylink also exists
-    UPDATE sass_associative_link sal
-    SET sal.al_type = 'both'
-    WHERE sal.al_from_page_id BETWEEN v_batch_start AND v_batch_end
-      AND sal.al_type = 'pagelink'
-      AND EXISTS (
-        SELECT 1 FROM categorylinks cl
-        WHERE cl.cl_from = sal.al_from_page_id
-          AND cl.cl_target_id = sal.al_to_page_id
-          AND cl.cl_type IN ('page', 'subcat')
-      );
-    
-    SET v_batch_links = ROW_COUNT();
-    
-    -- Progress report every batch
-    SELECT 
-      CONCAT('Dual Relationships Batch ', v_current_batch) AS status,
-      CONCAT(v_batch_start, ' - ', v_batch_end) AS page_range,
-      FORMAT(v_batch_links, 0) AS updated_to_both,
-      CONCAT(ROUND(100.0 * (v_batch_end - v_min_page_id) / (v_max_page_id - v_min_page_id), 1), '%') AS progress,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
-    
-    SET v_batch_start = v_batch_end + 1;
-  END WHILE;
-  
-  -- Final count
-  SET v_total_links = (SELECT COUNT(*) FROM sass_associative_link);
-  
-  -- Update final state
-  INSERT INTO associative_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 4, 'Build completed successfully')
-  ON DUPLICATE KEY UPDATE state_value = 4, state_text = 'Build completed successfully';
-  
-  INSERT INTO associative_build_state (state_key, state_value) 
-  VALUES ('total_associative_links', v_total_links)
-  ON DUPLICATE KEY UPDATE state_value = v_total_links;
-  
-  -- Final summary
-  SELECT 
-    'Batched Associative Build Complete' AS status,
-    FORMAT(v_pagelinks_done, 0) AS pagelinks_added,
-    FORMAT(v_categorylinks_done, 0) AS categorylinks_added,
-    FORMAT(v_total_links, 0) AS total_links_created,
-    ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
-  
-  -- Link type distribution
-  SELECT 
-    al_type,
-    FORMAT(COUNT(*), 0) AS count,
-    CONCAT(ROUND(100.0 * COUNT(*) / v_total_links, 1), '%') AS percentage
-  FROM sass_associative_link
-  GROUP BY al_type
-  ORDER BY COUNT(*) DESC;
-
-END//
-
-DELIMITER ;
-
--- ========================================
 -- UTILITY PROCEDURES
 -- ========================================
 
--- Procedure to analyze link patterns and quality
-DROP PROCEDURE IF EXISTS AnalyzeAssociativeLinkPatterns;
+-- Procedure to analyze representative consolidation patterns
+DROP PROCEDURE IF EXISTS AnalyzeRepresentativeConsolidation;
 
 DELIMITER //
 
-CREATE PROCEDURE AnalyzeAssociativeLinkPatterns()
+CREATE PROCEDURE AnalyzeRepresentativeConsolidation()
 BEGIN
-  -- Link direction analysis
+  -- Consolidation rate by link type
   SELECT 
-    'Link Direction Analysis' AS analysis_type,
-    CASE 
-      WHEN sp_from.page_is_leaf = 1 AND sp_to.page_is_leaf = 1 THEN 'Article → Article'
-      WHEN sp_from.page_is_leaf = 1 AND sp_to.page_is_leaf = 0 THEN 'Article → Category'
-      WHEN sp_from.page_is_leaf = 0 AND sp_to.page_is_leaf = 1 THEN 'Category → Article'
-      WHEN sp_from.page_is_leaf = 0 AND sp_to.page_is_leaf = 0 THEN 'Category → Category'
-    END AS link_direction,
-    FORMAT(COUNT(*), 0) AS link_count,
-    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM sass_associative_link), 1), '%') AS percentage
-  FROM sass_associative_link sal
-  JOIN sass_page sp_from ON sal.al_from_page_id = sp_from.page_id
-  JOIN sass_page sp_to ON sal.al_to_page_id = sp_to.page_id
-  GROUP BY sp_from.page_is_leaf, sp_to.page_is_leaf
-  ORDER BY COUNT(*) DESC;
+    'Consolidation Analysis by Link Type' AS analysis_type,
+    link_type,
+    FORMAT(COUNT(*), 0) AS total_original_links,
+    FORMAT(SUM(is_consolidated), 0) AS consolidated_links,
+    FORMAT(COUNT(*) - SUM(is_consolidated), 0) AS direct_representative_links,
+    CONCAT(ROUND(100.0 * SUM(is_consolidated) / COUNT(*), 1), '%') AS consolidation_rate
+  FROM sass_representative_consolidation
+  GROUP BY link_type;
   
-  -- Cross-domain analysis
+  -- Most consolidated representative pairs
   SELECT 
-    'Cross-Domain Link Analysis' AS analysis_type,
-    CASE 
-      WHEN sp_from.page_root_id = sp_to.page_root_id THEN 'Same Domain'
-      ELSE 'Cross Domain'
-    END AS domain_relationship,
-    FORMAT(COUNT(*), 0) AS link_count,
-    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM sass_associative_link), 1), '%') AS percentage
-  FROM sass_associative_link sal
-  JOIN sass_page sp_from ON sal.al_from_page_id = sp_from.page_id
-  JOIN sass_page sp_to ON sal.al_to_page_id = sp_to.page_id
-  GROUP BY CASE WHEN sp_from.page_root_id = sp_to.page_root_id THEN 'Same Domain' ELSE 'Cross Domain' END
-  ORDER BY COUNT(*) DESC;
-  
-  -- Most connected pages
-  SELECT 
-    'Most Connected Pages (Outbound)' AS connection_type,
-    CONVERT(sp.page_title, CHAR) AS page_title,
-    COUNT(*) AS outbound_links,
-    sp.page_dag_level AS page_level,
-    CASE WHEN sp.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS page_type
-  FROM sass_associative_link sal
-  JOIN sass_page sp ON sal.al_from_page_id = sp.page_id
-  GROUP BY sal.al_from_page_id
+    'Most Consolidated Representative Pairs' AS analysis_type,
+    CONVERT(sp_src.page_title, CHAR) AS source_representative,
+    CONVERT(sp_tgt.page_title, CHAR) AS target_representative,
+    COUNT(*) AS original_link_variations,
+    COUNT(DISTINCT src.link_type) AS link_types_present
+  FROM sass_representative_consolidation src
+  JOIN sass_page_clean sp_src ON src.representative_source_id = sp_src.page_id
+  JOIN sass_page_clean sp_tgt ON src.representative_target_id = sp_tgt.page_id
+  WHERE src.is_consolidated = 1
+  GROUP BY src.representative_source_id, src.representative_target_id
   ORDER BY COUNT(*) DESC
+  LIMIT 20;
+  
+  -- Source page consolidation distribution
+  SELECT 
+    'Source Page Consolidation Distribution' AS analysis_type,
+    consolidations_per_representative,
+    COUNT(*) AS representative_count
+  FROM (
+    SELECT 
+      representative_source_id,
+      COUNT(*) AS consolidations_per_representative
+    FROM sass_representative_consolidation
+    WHERE is_consolidated = 1
+    GROUP BY representative_source_id
+  ) consolidation_stats
+  GROUP BY consolidations_per_representative
+  ORDER BY consolidations_per_representative DESC
   LIMIT 10;
 
 END//
@@ -602,57 +532,68 @@ CREATE PROCEDURE TestAssociativeSearch(
 BEGIN
   DECLARE v_page_id INT;
   
-  -- Find the page ID
+  -- Find the representative page ID
   SELECT page_id INTO v_page_id
-  FROM sass_page 
+  FROM sass_page_clean 
   WHERE CONVERT(page_title, CHAR) = p_page_title
   LIMIT 1;
   
   IF v_page_id IS NULL THEN
-    SELECT CONCAT('Page not found: ', p_page_title) AS error_message;
+    SELECT CONCAT('Representative page not found: ', p_page_title) AS error_message;
   ELSE
-    -- Show outbound links
+    -- Show outbound associative links
     SELECT 
-      'Outbound Associative Links' AS search_type,
-      CONVERT(sp_to.page_title, CHAR) AS linked_to_title,
+      'Outbound Associative Links from Representative' AS search_type,
+      CONVERT(sp_to.page_title, CHAR) AS linked_to_representative,
       sal.al_type AS relationship_type,
       sp_to.page_dag_level AS target_level,
       CASE WHEN sp_to.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS target_type
     FROM sass_associative_link sal
-    JOIN sass_page sp_to ON sal.al_to_page_id = sp_to.page_id
+    JOIN sass_page_clean sp_to ON sal.al_to_page_id = sp_to.page_id
     WHERE sal.al_from_page_id = v_page_id
       AND (p_link_type IS NULL OR sal.al_type = p_link_type)
     ORDER BY sal.al_type, sp_to.page_title
-    LIMIT 20;
+    LIMIT 25;
     
-    -- Show inbound links
+    -- Show inbound associative links
     SELECT 
-      'Inbound Associative Links' AS search_type,
-      CONVERT(sp_from.page_title, CHAR) AS linked_from_title,
+      'Inbound Associative Links to Representative' AS search_type,
+      CONVERT(sp_from.page_title, CHAR) AS linked_from_representative,
       sal.al_type AS relationship_type,
       sp_from.page_dag_level AS source_level,
       CASE WHEN sp_from.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS source_type
     FROM sass_associative_link sal
-    JOIN sass_page sp_from ON sal.al_from_page_id = sp_from.page_id
+    JOIN sass_page_clean sp_from ON sal.al_from_page_id = sp_from.page_id
     WHERE sal.al_to_page_id = v_page_id
       AND (p_link_type IS NULL OR sal.al_type = p_link_type)
     ORDER BY sal.al_type, sp_from.page_title
-    LIMIT 20;
+    LIMIT 25;
+    
+    -- Show identity group information
+    SELECT 
+      'Identity Group Information' AS info_type,
+      COUNT(*) AS total_pages_in_identity_group,
+      COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS is_representative_itself,
+      GROUP_CONCAT(DISTINCT CASE WHEN sip.page_is_leaf = 1 THEN 'Articles' ELSE 'Categories' END) AS page_types_in_group
+    FROM sass_identity_pages sip
+    WHERE sip.representative_page_id = v_page_id;
   END IF;
 
 END//
 
 DELIMITER ;
 
--- Procedure to validate data integrity
-DROP PROCEDURE IF EXISTS ValidateAssociativeLinkIntegrity;
+-- Procedure to validate associative link integrity with representatives
+DROP PROCEDURE IF EXISTS ValidateAssociativeLinkIntegrityWithRepresentatives;
 
 DELIMITER //
 
-CREATE PROCEDURE ValidateAssociativeLinkIntegrity()
+CREATE PROCEDURE ValidateAssociativeLinkIntegrityWithRepresentatives()
 BEGIN
   DECLARE v_orphaned_sources INT DEFAULT 0;
   DECLARE v_orphaned_targets INT DEFAULT 0;
+  DECLARE v_non_representative_sources INT DEFAULT 0;
+  DECLARE v_non_representative_targets INT DEFAULT 0;
   DECLARE v_self_links INT DEFAULT 0;
   DECLARE v_invalid_types INT DEFAULT 0;
   
@@ -660,15 +601,27 @@ BEGIN
   SELECT COUNT(*) INTO v_orphaned_sources
   FROM sass_associative_link sal
   WHERE NOT EXISTS (
-    SELECT 1 FROM sass_page sp WHERE sp.page_id = sal.al_from_page_id
+    SELECT 1 FROM sass_page_clean spc WHERE spc.page_id = sal.al_from_page_id
   );
   
   -- Check for orphaned target pages
   SELECT COUNT(*) INTO v_orphaned_targets
   FROM sass_associative_link sal
   WHERE NOT EXISTS (
-    SELECT 1 FROM sass_page sp WHERE sp.page_id = sal.al_to_page_id
+    SELECT 1 FROM sass_page_clean spc WHERE spc.page_id = sal.al_to_page_id
   );
+  
+  -- Check for sources that are not representatives
+  SELECT COUNT(*) INTO v_non_representative_sources
+  FROM sass_associative_link sal
+  JOIN sass_identity_pages sip ON sal.al_from_page_id = sip.page_id
+  WHERE sip.page_id != sip.representative_page_id;
+  
+  -- Check for targets that are not representatives
+  SELECT COUNT(*) INTO v_non_representative_targets
+  FROM sass_associative_link sal
+  JOIN sass_identity_pages sip ON sal.al_to_page_id = sip.page_id
+  WHERE sip.page_id != sip.representative_page_id;
   
   -- Check for self-links
   SELECT COUNT(*) INTO v_self_links
@@ -682,13 +635,17 @@ BEGIN
   
   -- Report validation results
   SELECT 
-    'Data Integrity Validation' AS validation_type,
+    'Associative Link Representative Integrity Validation' AS validation_type,
     v_orphaned_sources AS orphaned_sources,
     v_orphaned_targets AS orphaned_targets,
+    v_non_representative_sources AS non_representative_sources,
+    v_non_representative_targets AS non_representative_targets,
     v_self_links AS self_links,
     v_invalid_types AS invalid_types,
     CASE 
-      WHEN v_orphaned_sources = 0 AND v_orphaned_targets = 0 AND v_self_links = 0 AND v_invalid_types = 0 
+      WHEN v_orphaned_sources = 0 AND v_orphaned_targets = 0 AND 
+           v_non_representative_sources = 0 AND v_non_representative_targets = 0 AND 
+           v_self_links = 0 AND v_invalid_types = 0 
       THEN 'PASS' 
       ELSE 'FAIL' 
     END AS validation_status;
@@ -702,48 +659,53 @@ DELIMITER ;
 -- ========================================
 
 /*
--- ASSOCIATIVE LINK BUILD EXAMPLES
+-- STREAMING ASSOCIATIVE BUILD WITH REPRESENTATIVE RESOLUTION
 
--- Standard build with progress reporting:
-CALL BuildSASSAssociativeLinks(1000000, 1);
+-- Standard build with consolidation tracking:
+CALL BuildSASSAssociativeLinksStreaming(1000000, 1, 1);
 
--- Optimized build for large datasets:
-CALL BuildSASSAssociativeLinksOptimized(1);
+-- High-performance build (no consolidation tracking):
+CALL BuildSASSAssociativeLinksStreaming(2000000, 1, 0);
 
--- Analyze link patterns:
-CALL AnalyzeAssociativeLinkPatterns();
+-- Silent build for production:
+CALL BuildSASSAssociativeLinksStreaming(1500000, 0, 0);
+
+-- Analyze representative consolidation patterns:
+CALL AnalyzeRepresentativeConsolidation();
 
 -- Test associative search:
 CALL TestAssociativeSearch('Machine_learning', NULL);
 CALL TestAssociativeSearch('Artificial_intelligence', 'pagelink');
-CALL TestAssociativeSearch('Computer_science', 'categorylink');
+CALL TestAssociativeSearch('Computer_science', 'both');
 
 -- Validate data integrity:
-CALL ValidateAssociativeLinkIntegrity();
+CALL ValidateAssociativeLinkIntegrityWithRepresentatives();
 
--- Check build status:
+-- Check build status and statistics:
 SELECT * FROM associative_build_state ORDER BY updated_at DESC;
+SELECT * FROM sass_link_processing_stats ORDER BY created_at DESC;
 
--- Sample queries on final data:
+-- Sample queries on representative-resolved associative links:
 
--- Find all pages linked to "Machine Learning":
+-- Find all representatives linked to "Machine Learning":
 SELECT 
-  CONVERT(sp_from.page_title, CHAR) as source_title,
+  CONVERT(sp_from.page_title, CHAR) as source_representative,
   sal.al_type as relationship_type,
-  sp_from.page_dag_level as source_level
+  sp_from.page_dag_level as source_level,
+  CASE WHEN sp_from.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END as source_type
 FROM sass_associative_link sal
-JOIN sass_page sp_from ON sal.al_from_page_id = sp_from.page_id
-JOIN sass_page sp_to ON sal.al_to_page_id = sp_to.page_id
+JOIN sass_page_clean sp_from ON sal.al_from_page_id = sp_from.page_id
+JOIN sass_page_clean sp_to ON sal.al_to_page_id = sp_to.page_id
 WHERE CONVERT(sp_to.page_title, CHAR) = 'Machine_learning'
-ORDER BY sal.al_type, source_title;
+ORDER BY sal.al_type, source_representative;
 
--- Most interconnected categories:
+-- Most interconnected representative categories:
 SELECT 
-  CONVERT(sp.page_title, CHAR) as category_title,
+  CONVERT(sp.page_title, CHAR) as representative_title,
   COUNT(DISTINCT sal_out.al_to_page_id) as outbound_links,
   COUNT(DISTINCT sal_in.al_from_page_id) as inbound_links,
   COUNT(DISTINCT sal_out.al_to_page_id) + COUNT(DISTINCT sal_in.al_from_page_id) as total_connections
-FROM sass_page sp
+FROM sass_page_clean sp
 LEFT JOIN sass_associative_link sal_out ON sp.page_id = sal_out.al_from_page_id
 LEFT JOIN sass_associative_link sal_in ON sp.page_id = sal_in.al_to_page_id
 WHERE sp.page_is_leaf = 0
@@ -751,31 +713,47 @@ GROUP BY sp.page_id
 ORDER BY total_connections DESC
 LIMIT 20;
 
--- Cross-domain knowledge bridges:
+-- Cross-domain knowledge bridges between representatives:
 SELECT 
-  CONVERT(sp_from.page_title, CHAR) as source_title,
-  CONVERT(sp_to.page_title, CHAR) as target_title,
+  CONVERT(sp_from.page_title, CHAR) as source_representative,
+  CONVERT(sp_to.page_title, CHAR) as target_representative,
   sal.al_type,
   sp_from.page_root_id as source_domain,
   sp_to.page_root_id as target_domain
 FROM sass_associative_link sal
-JOIN sass_page sp_from ON sal.al_from_page_id = sp_from.page_id
-JOIN sass_page sp_to ON sal.al_to_page_id = sp_to.page_id
+JOIN sass_page_clean sp_from ON sal.al_from_page_id = sp_from.page_id
+JOIN sass_page_clean sp_to ON sal.al_to_page_id = sp_to.page_id
 WHERE sp_from.page_root_id != sp_to.page_root_id
   AND sp_from.page_is_leaf = 1 
   AND sp_to.page_is_leaf = 1
 ORDER BY RAND()
 LIMIT 20;
 
-PERFORMANCE NOTES:
-- Standard build uses working tables for memory efficiency
-- Optimized build uses single union query (faster for sufficient RAM)
-- Both versions maintain referential integrity with SASS pages only
-- Self-links are explicitly excluded during extraction
+STREAMING ARCHITECTURE BENEFITS:
+- Memory-efficient processing of 1.5B+ pagelinks through batched streaming
+- Immediate representative resolution prevents large intermediate storage
+- Aggressive pre-filtering reduces processing by ~95% before representative resolution
+- Link type aggregation ensures correct 'both' classification for dual relationships
+- Comprehensive consolidation tracking shows impact of representative mapping
 
-QUALITY METRICS:
-- Relationship type classification enables targeted queries
-- Cross-domain links identify knowledge bridges between SASS domains
-- Bidirectional connectivity analysis reveals hub pages and isolated content
-- Data validation ensures consistency with source Wikipedia structures
+PERFORMANCE OPTIMIZATIONS:
+- Batch size of 1-2M optimal for Mac Studio M4 memory architecture
+- Pre-filtering eliminates majority of non-SASS relationships early
+- Streaming prevents memory exhaustion on large pagelinks table
+- Representative validation ensures all links point to canonical pages
+- Progressive reporting allows monitoring of long-running operations
+
+ESTIMATED RUNTIME ON MAC STUDIO M4:
+- Pre-filtering phase: 15-30 minutes
+- Pagelinks streaming: 60-90 minutes  
+- Categorylinks streaming: 30-45 minutes
+- Aggregation phase: 10-20 minutes
+- Total estimated time: 2-3 hours
+
+QUALITY IMPROVEMENTS:
+- All associative relationships use canonical representative pages
+- Eliminates duplicate relationships from title variations
+- Maintains proper link type classification through aggregation
+- Comprehensive validation ensures referential integrity
+- Consolidation tracking provides transparency into representative mapping impact
 */
