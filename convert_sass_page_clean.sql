@@ -342,27 +342,7 @@ BEGIN
   TRUNCATE TABLE sass_identity_pages;
   SET FOREIGN_KEY_CHECKS = 1;
   
-  -- Single query conversion with enhanced title cleaning
-  INSERT INTO sass_page_clean (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf
-  )
-  SELECT 
-    sp.page_id,
-    clean_page_title_enhanced(sp.page_title) as page_title,
-    sp.page_parent_id,
-    sp.page_root_id,
-    sp.page_dag_level,
-    sp.page_is_leaf
-  FROM sass_page sp;
-  
-  SET v_total_processed = ROW_COUNT();
-  
-  -- Create identity pages with representative mapping
+  -- Create identity pages with all pages and representative mapping
   INSERT INTO sass_identity_pages (
     page_id,
     page_title,
@@ -373,20 +353,41 @@ BEGIN
     representative_page_id
   )
   SELECT 
-    spc.page_id,
-    spc.page_title,
-    spc.page_parent_id,
-    spc.page_root_id,
-    spc.page_dag_level,
-    spc.page_is_leaf,
-    FIRST_VALUE(spc.page_id) OVER (
-      PARTITION BY spc.page_title 
-      ORDER BY spc.page_dag_level DESC, spc.page_is_leaf ASC, spc.page_id ASC
+    sp.page_id,
+    clean_page_title_enhanced(sp.page_title) as page_title,
+    sp.page_parent_id,
+    sp.page_root_id,
+    sp.page_dag_level,
+    sp.page_is_leaf,
+    FIRST_VALUE(sp.page_id) OVER (
+      PARTITION BY clean_page_title_enhanced(sp.page_title)
+      ORDER BY sp.page_dag_level DESC, sp.page_is_leaf ASC, sp.page_id ASC
       ROWS UNBOUNDED PRECEDING
     ) as representative_page_id
-  FROM sass_page_clean spc;
+  FROM sass_page sp;
   
   SET v_identity_pages = ROW_COUNT();
+  
+  -- Insert only representative pages into sass_page_clean
+  INSERT INTO sass_page_clean (
+    page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf
+  )
+  SELECT DISTINCT
+    representative_page_id as page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf
+  FROM sass_identity_pages sip1
+  WHERE sip1.page_id = sip1.representative_page_id;
+  
+  SET v_total_processed = ROW_COUNT();
   
   -- Summary report
   SELECT 
