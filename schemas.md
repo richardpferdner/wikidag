@@ -94,6 +94,18 @@ Notes:
 
 == New tables in this project ==
 
+wiki_top3_levels: 2114 rows                                                              
++--------------------+-----------------+------+-----+---------+
+| Field              | Type            | Null | Key | Default | 
++--------------------+-----------------+------+-----+---------+
+| parent_page_id     | bigint unsigned | YES  |     | NULL    |
+| parent_title       | varchar(255)    | YES  |     | NULL    |
+| child_page_id      | bigint unsigned | YES  |     | NULL    |
+| child_title        | varchar(255)    | YES  |     | NULL    |
+| grandchild_page_id | bigint unsigned | YES  |     | NULL    |
+| grandchild_title   | varchar(255)    | YES  |     | NULL    |
++--------------------+-----------------+------+-----+---------+
+
 sass_page: 15,119,748 rows
 DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
