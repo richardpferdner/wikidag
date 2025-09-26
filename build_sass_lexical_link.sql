@@ -1,55 +1,58 @@
--- SASS Wikipedia Page Title Cleaner with Identity Pages
--- Converts sass_page to sass_page_clean with standardized titles
--- Creates sass_identity_pages with representative page mapping
--- Applies enhanced text normalization for improved matching and search
+-- SASS Wikipedia Lexical Link Builder - Representative Page Resolution
+-- Builds sass_lexical_link table from redirect table with representative page mapping
+-- Applies enhanced text normalization and resolves to canonical representative pages
+-- Uses sass_identity_pages for comprehensive source/target resolution
 
 -- ========================================
 -- TABLE DEFINITIONS
 -- ========================================
 
--- Clean SASS page table with identical structure to sass_page
-CREATE TABLE IF NOT EXISTS sass_page_clean (
-  page_id INT UNSIGNED NOT NULL,
-  page_title VARCHAR(255) NOT NULL,
-  page_parent_id INT NOT NULL,
-  page_root_id INT NOT NULL,
-  page_dag_level INT NOT NULL,
-  page_is_leaf TINYINT(1) NOT NULL DEFAULT 0,
+-- Main SASS lexical link table matching schemas.md specification
+CREATE TABLE IF NOT EXISTS sass_lexical_link (
+  ll_from_title VARBINARY(255) NOT NULL,
+  ll_to_page_id INT UNSIGNED NOT NULL,
+  ll_to_fragment VARBINARY(255) NULL,
   
-  PRIMARY KEY (page_id),
-  INDEX idx_title (page_title),
-  INDEX idx_parent (page_parent_id),
-  INDEX idx_root (page_root_id),
-  INDEX idx_level (page_dag_level),
-  INDEX idx_leaf (page_is_leaf)
+  PRIMARY KEY (ll_from_title, ll_to_page_id),
+  INDEX idx_from_title (ll_from_title),
+  INDEX idx_to_page (ll_to_page_id),
+  INDEX idx_fragment (ll_to_fragment)
 ) ENGINE=InnoDB;
 
--- Identity pages table with representative page mapping
-CREATE TABLE IF NOT EXISTS sass_identity_pages (
-  page_id INT UNSIGNED NOT NULL,
-  page_title VARCHAR(255) NOT NULL,
-  page_parent_id INT NOT NULL,
-  page_root_id INT NOT NULL,
-  page_dag_level INT NOT NULL,
-  page_is_leaf TINYINT(1) NOT NULL DEFAULT 0,
-  representative_page_id INT UNSIGNED NOT NULL,
+-- Temporary working table for redirect processing
+CREATE TABLE IF NOT EXISTS sass_redirect_work (
+  rd_from INT UNSIGNED NOT NULL,
+  rd_from_title VARCHAR(255) NOT NULL,
+  rd_target_title VARCHAR(255) NOT NULL,
+  rd_target_page_id INT UNSIGNED NOT NULL,
+  rd_representative_id INT UNSIGNED NOT NULL,
+  rd_fragment VARCHAR(255) NULL,
   
-  PRIMARY KEY (page_id),
-  INDEX idx_title (page_title),
-  INDEX idx_parent (page_parent_id),
-  INDEX idx_root (page_root_id),
-  INDEX idx_level (page_dag_level),
-  INDEX idx_leaf (page_is_leaf),
-  INDEX idx_representative (representative_page_id),
-  FOREIGN KEY (representative_page_id) REFERENCES sass_page_clean(page_id)
-) ENGINE=InnoDB;
+  PRIMARY KEY (rd_from, rd_target_page_id),
+  INDEX idx_from (rd_from),
+  INDEX idx_target (rd_target_page_id),
+  INDEX idx_representative (rd_representative_id)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
 
 -- Build progress tracking
-CREATE TABLE IF NOT EXISTS clean_build_state (
+CREATE TABLE IF NOT EXISTS lexical_build_state (
   state_key VARCHAR(255) PRIMARY KEY,
   state_value INT NOT NULL,
   state_text VARCHAR(500) NULL,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- Chain resolution tracking for redirect cycles
+CREATE TABLE IF NOT EXISTS sass_redirect_chains (
+  chain_id INT AUTO_INCREMENT PRIMARY KEY,
+  rd_from INT UNSIGNED NOT NULL,
+  rd_to_title VARCHAR(255) NOT NULL,
+  chain_length INT NOT NULL,
+  final_target_id INT UNSIGNED NULL,
+  resolution_status ENUM('resolved', 'cycle_detected', 'external_link', 'unresolved') NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_from (rd_from),
+  INDEX idx_status (resolution_status)
 ) ENGINE=InnoDB;
 
 -- ========================================
@@ -86,7 +89,7 @@ BEGIN
   SET cleaned_title = REPLACE(cleaned_title, ',', '');
   SET cleaned_title = REPLACE(cleaned_title, '.', '');
   
-  -- Step 5: Convert currency to text (preserve existing functionality)
+  -- Step 5: Convert currency to text
   SET cleaned_title = REPLACE(cleaned_title, '€', 'Euro');
   SET cleaned_title = REPLACE(cleaned_title, '£', 'Pound');
   SET cleaned_title = REPLACE(cleaned_title, '¥', 'Yen');
@@ -115,293 +118,284 @@ END//
 DELIMITER ;
 
 -- ========================================
--- MAIN CONVERSION PROCEDURE
+-- MAIN BUILD PROCEDURE WITH REPRESENTATIVE RESOLUTION
 -- ========================================
 
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentity;
+DROP PROCEDURE IF EXISTS BuildSASSLexicalLinksWithRepresentatives;
 
 DELIMITER //
 
-CREATE PROCEDURE ConvertSASSPageCleanWithIdentity(
-  IN p_batch_size INT
+CREATE PROCEDURE BuildSASSLexicalLinksWithRepresentatives(
+  IN p_batch_size INT,
+  IN p_max_chain_depth INT,
+  IN p_enable_progress_reports TINYINT(1)
 )
 BEGIN
   DECLARE v_start_time DECIMAL(14,3);
-  DECLARE v_total_pages INT DEFAULT 0;
-  DECLARE v_processed_pages INT DEFAULT 0;
-  DECLARE v_batch_count INT DEFAULT 0;
-  DECLARE v_last_page_id INT DEFAULT 0;
-  DECLARE v_continue TINYINT(1) DEFAULT 1;
-  DECLARE v_identity_pages INT DEFAULT 0;
+  DECLARE v_redirects_processed INT DEFAULT 0;
+  DECLARE v_lexical_links_created INT DEFAULT 0;
+  DECLARE v_external_redirects INT DEFAULT 0;
+  DECLARE v_unresolved_redirects INT DEFAULT 0;
+  DECLARE v_cycle_detected INT DEFAULT 0;
+  DECLARE v_representative_consolidations INT DEFAULT 0;
   
   -- Set defaults
-  IF p_batch_size IS NULL THEN SET p_batch_size = 100000; END IF;
+  IF p_batch_size IS NULL THEN SET p_batch_size = 500000; END IF;
+  IF p_max_chain_depth IS NULL THEN SET p_max_chain_depth = 5; END IF;
+  IF p_enable_progress_reports IS NULL THEN SET p_enable_progress_reports = 1; END IF;
   
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Get total count
-  SELECT COUNT(*) INTO v_total_pages FROM sass_page;
-  
-  -- Clear target tables (disable foreign key checks for truncation)
-  SET FOREIGN_KEY_CHECKS = 0;
-  TRUNCATE TABLE sass_page_clean;
-  TRUNCATE TABLE sass_identity_pages;
-  SET FOREIGN_KEY_CHECKS = 1;
+  -- Clear target and working tables
+  TRUNCATE TABLE sass_lexical_link;
+  TRUNCATE TABLE sass_redirect_work;
+  TRUNCATE TABLE sass_redirect_chains;
   
   -- Initialize build state
-  INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 0, 'Starting page title cleaning with identity mapping')
-  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting page title cleaning with identity mapping';
+  INSERT INTO lexical_build_state (state_key, state_value, state_text) 
+  VALUES ('build_status', 0, 'Starting lexical link build with representative resolution')
+  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting lexical link build with representative resolution';
   
-  -- Progress report
+  -- ========================================
+  -- PHASE 1: EXTRACT AND RESOLVE REDIRECTS
+  -- ========================================
+  
+  INSERT INTO lexical_build_state (state_key, state_value, state_text) 
+  VALUES ('current_phase', 1, 'Processing redirects with representative resolution')
+  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Processing redirects with representative resolution';
+  
+  -- Extract valid redirects where source exists in SASS and resolve targets to representatives
+  INSERT IGNORE INTO sass_redirect_work (
+    rd_from,
+    rd_from_title,
+    rd_target_title,
+    rd_target_page_id,
+    rd_representative_id,
+    rd_fragment
+  )
+  SELECT DISTINCT
+    r.rd_from,
+    clean_page_title_enhanced(CONVERT(sp_from.page_title, CHAR)) as rd_from_title,
+    clean_page_title_enhanced(CONVERT(r.rd_title, CHAR)) as rd_target_title,
+    sip_target.page_id as rd_target_page_id,
+    sip_target.representative_page_id as rd_representative_id,
+    CASE 
+      WHEN r.rd_fragment IS NOT NULL 
+      THEN clean_page_title_enhanced(CONVERT(r.rd_fragment, CHAR))
+      ELSE NULL 
+    END as rd_fragment
+  FROM redirect r
+  JOIN page sp_from ON r.rd_from = sp_from.page_id                    -- Source page exists
+  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id  -- Source is in SASS
+  JOIN sass_identity_pages sip_target ON clean_page_title_enhanced(CONVERT(r.rd_title, CHAR)) = sip_target.page_title  -- Target title matches SASS
+  WHERE r.rd_interwiki IS NULL                                        -- Exclude external links
+    AND r.rd_namespace IN (0, 14)                                     -- Only articles and categories
+    AND sp_from.page_content_model = 'wikitext'                       -- Valid content
+    AND r.rd_from != sip_target.page_id;                              -- Exclude self-redirects
+  
+  SET v_redirects_processed = ROW_COUNT();
+  
+  -- Count external/interwiki redirects for statistics
+  SELECT COUNT(*) INTO v_external_redirects
+  FROM redirect r
+  JOIN page sp_from ON r.rd_from = sp_from.page_id
+  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
+  WHERE r.rd_interwiki IS NOT NULL;
+  
+  -- Count unresolved redirects (targets not in SASS)
+  SELECT COUNT(*) INTO v_unresolved_redirects
+  FROM redirect r
+  JOIN page sp_from ON r.rd_from = sp_from.page_id
+  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
+  WHERE r.rd_interwiki IS NULL
+    AND r.rd_namespace IN (0, 14)
+    AND sp_from.page_content_model = 'wikitext'
+    AND NOT EXISTS (
+      SELECT 1 FROM sass_identity_pages sip_target 
+      WHERE clean_page_title_enhanced(CONVERT(r.rd_title, CHAR)) = sip_target.page_title
+    );
+  
+  IF p_enable_progress_reports = 1 THEN
+    SELECT 
+      'Phase 1: Redirect Processing' AS status,
+      FORMAT(v_redirects_processed, 0) AS redirects_processed,
+      FORMAT(v_external_redirects, 0) AS external_redirects_excluded,
+      FORMAT(v_unresolved_redirects, 0) AS unresolved_targets_excluded,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
+  END IF;
+  
+  -- ========================================
+  -- PHASE 2: CREATE LEXICAL LINKS WITH REPRESENTATIVE CONSOLIDATION
+  -- ========================================
+  
+  INSERT INTO lexical_build_state (state_key, state_value, state_text) 
+  VALUES ('current_phase', 2, 'Creating lexical links with representative consolidation')
+  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Creating lexical links with representative consolidation';
+  
+  -- Build lexical links pointing to representative pages
+  INSERT IGNORE INTO sass_lexical_link (ll_from_title, ll_to_page_id, ll_to_fragment)
+  SELECT DISTINCT
+    CONVERT(srw.rd_from_title, BINARY) as ll_from_title,
+    srw.rd_representative_id as ll_to_page_id,
+    CASE 
+      WHEN srw.rd_fragment IS NOT NULL 
+      THEN CONVERT(srw.rd_fragment, BINARY)
+      ELSE NULL 
+    END as ll_to_fragment
+  FROM sass_redirect_work srw
+  JOIN sass_page_clean spc ON srw.rd_representative_id = spc.page_id   -- Ensure target is representative
+  WHERE srw.rd_representative_id IS NOT NULL;
+  
+  SET v_lexical_links_created = ROW_COUNT();
+  
+  -- Calculate consolidation effect
   SELECT 
-    'Starting Dual Table Conversion' AS status,
-    FORMAT(v_total_pages, 0) AS total_pages_to_process,
-    p_batch_size AS batch_size;
+    COUNT(*) - COUNT(DISTINCT rd_representative_id) INTO v_representative_consolidations
+  FROM sass_redirect_work 
+  WHERE rd_representative_id IS NOT NULL;
   
-  -- ========================================
-  -- PHASE 1: BUILD sass_page_clean
-  -- ========================================
-  
-  WHILE v_continue = 1 DO
-    SET v_batch_count = v_batch_count + 1;
-    
-    -- Process batch with enhanced title cleaning
-    INSERT INTO sass_page_clean (
-      page_id,
-      page_title,
-      page_parent_id,
-      page_root_id,
-      page_dag_level,
-      page_is_leaf
-    )
+  IF p_enable_progress_reports = 1 THEN
     SELECT 
-      sp.page_id,
-      clean_page_title_enhanced(sp.page_title) as page_title,
-      sp.page_parent_id,
-      sp.page_root_id,
-      sp.page_dag_level,
-      sp.page_is_leaf
-    FROM sass_page sp
-    WHERE sp.page_id > v_last_page_id
-    ORDER BY sp.page_id
-    LIMIT p_batch_size;
-    
-    SET v_processed_pages = v_processed_pages + ROW_COUNT();
-    
-    -- Update last processed ID for next batch
-    SELECT MAX(page_id) INTO v_last_page_id FROM sass_page_clean;
-    
-    -- Progress report
-    SELECT 
-      CONCAT('sass_page_clean Batch ', v_batch_count) AS status,
-      FORMAT(ROW_COUNT(), 0) AS pages_in_batch,
-      FORMAT(v_processed_pages, 0) AS total_processed,
-      CONCAT(ROUND(100.0 * v_processed_pages / v_total_pages, 1), '%') AS progress,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
-    
-    -- Check if done
-    IF ROW_COUNT() < p_batch_size OR v_processed_pages >= v_total_pages THEN
-      SET v_continue = 0;
-    END IF;
-    
-  END WHILE;
+      'Phase 2: Lexical Link Creation' AS status,
+      FORMAT(v_lexical_links_created, 0) AS lexical_links_created,
+      FORMAT(v_representative_consolidations, 0) AS redirects_consolidated_to_representatives,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
+  END IF;
   
   -- ========================================
-  -- PHASE 2: BUILD sass_identity_pages
+  -- PHASE 3: CHAIN RESOLUTION ANALYSIS
   -- ========================================
   
-  INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 2, 'Building identity pages with representative mapping')
-  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Building identity pages with representative mapping';
+  INSERT INTO lexical_build_state (state_key, state_value, state_text) 
+  VALUES ('current_phase', 3, 'Analyzing redirect chains and cycles')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Analyzing redirect chains and cycles';
   
-  -- Create temporary table for representative page calculation
-  CREATE TEMPORARY TABLE temp_representatives AS
-  SELECT 
-    page_title,
-    page_id as representative_page_id
-  FROM (
+  -- Analyze potential redirect chains (for reference and quality control)
+  INSERT INTO sass_redirect_chains (rd_from, rd_to_title, chain_length, final_target_id, resolution_status)
+  WITH RECURSIVE redirect_chain AS (
+    -- Base case: direct redirects
     SELECT 
-      page_title,
-      page_id,
-      page_dag_level,
-      page_is_leaf,
-      ROW_NUMBER() OVER (
-        PARTITION BY page_title 
-        ORDER BY page_dag_level DESC, page_is_leaf ASC, page_id ASC
-      ) as rn
-    FROM sass_page_clean
-  ) ranked
-  WHERE rn = 1;
-  
-  -- Build sass_identity_pages with representative mapping
-  INSERT INTO sass_identity_pages (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf,
-    representative_page_id
+      r.rd_from,
+      CONVERT(r.rd_title, CHAR) as rd_to_title,
+      1 as chain_length,
+      srw.rd_representative_id as final_target_id,
+      CASE 
+        WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
+        WHEN r.rd_interwiki IS NOT NULL THEN 'external_link'
+        ELSE 'unresolved'
+      END as resolution_status,
+      ARRAY[r.rd_from] as visited_pages
+    FROM redirect r
+    LEFT JOIN sass_redirect_work srw ON r.rd_from = srw.rd_from
+    JOIN page sp_from ON r.rd_from = sp_from.page_id
+    JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
+    WHERE r.rd_namespace IN (0, 14)
+      AND sp_from.page_content_model = 'wikitext'
+    
+    UNION ALL
+    
+    -- Recursive case: follow chains up to max depth
+    SELECT 
+      rc.rd_from,
+      CONVERT(r.rd_title, CHAR) as rd_to_title,
+      rc.chain_length + 1,
+      srw.rd_representative_id as final_target_id,
+      CASE 
+        WHEN r.rd_from = ANY(rc.visited_pages) THEN 'cycle_detected'
+        WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
+        WHEN r.rd_interwiki IS NOT NULL THEN 'external_link'
+        WHEN rc.chain_length >= p_max_chain_depth THEN 'unresolved'
+        ELSE 'unresolved'
+      END as resolution_status,
+      ARRAY_APPEND(rc.visited_pages, r.rd_from) as visited_pages
+    FROM redirect_chain rc
+    JOIN page p ON CONVERT(rc.rd_to_title, CHAR) = CONVERT(p.page_title, CHAR)
+    JOIN redirect r ON p.page_id = r.rd_from
+    LEFT JOIN sass_redirect_work srw ON r.rd_from = srw.rd_from
+    WHERE rc.chain_length < p_max_chain_depth
+      AND rc.resolution_status = 'unresolved'
+      AND r.rd_from != ALL(rc.visited_pages)  -- Prevent infinite loops
   )
   SELECT 
-    spc.page_id,
-    spc.page_title,
-    spc.page_parent_id,
-    spc.page_root_id,
-    spc.page_dag_level,
-    spc.page_is_leaf,
-    tr.representative_page_id
-  FROM sass_page_clean spc
-  JOIN temp_representatives tr ON spc.page_title = tr.page_title;
+    rd_from,
+    rd_to_title,
+    chain_length,
+    final_target_id,
+    resolution_status
+  FROM redirect_chain
+  WHERE resolution_status IN ('resolved', 'cycle_detected', 'external_link')
+     OR chain_length = p_max_chain_depth;
   
-  SET v_identity_pages = ROW_COUNT();
+  -- Count cycle detections
+  SELECT COUNT(*) INTO v_cycle_detected
+  FROM sass_redirect_chains 
+  WHERE resolution_status = 'cycle_detected';
   
-  -- Clean up temporary table
-  DROP TEMPORARY TABLE temp_representatives;
-  
-  -- Re-enable foreign key checks
-  SET FOREIGN_KEY_CHECKS = 1;
+  IF p_enable_progress_reports = 1 THEN
+    SELECT 
+      'Phase 3: Chain Analysis' AS status,
+      FORMAT(v_cycle_detected, 0) AS redirect_cycles_detected,
+      FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE resolution_status = 'resolved'), 0) AS chains_resolved,
+      FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE resolution_status = 'external_link'), 0) AS external_chains,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
+  END IF;
   
   -- Update final build state
-  INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 100, 'Dual table conversion completed successfully')
-  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Dual table conversion completed successfully';
+  INSERT INTO lexical_build_state (state_key, state_value, state_text) 
+  VALUES ('build_status', 100, 'Lexical link build completed successfully')
+  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Lexical link build completed successfully';
   
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('total_pages_converted', v_processed_pages)
-  ON DUPLICATE KEY UPDATE state_value = v_processed_pages;
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('total_identity_pages', v_identity_pages)
-  ON DUPLICATE KEY UPDATE state_value = v_identity_pages;
+  INSERT INTO lexical_build_state (state_key, state_value) 
+  VALUES ('total_lexical_links', v_lexical_links_created)
+  ON DUPLICATE KEY UPDATE state_value = v_lexical_links_created;
   
   -- ========================================
   -- FINAL SUMMARY REPORT
   -- ========================================
   
   SELECT 
-    'COMPLETE - SASS Identity Page Conversion' AS final_status,
-    FORMAT(v_total_pages, 0) AS original_pages,
-    FORMAT(v_processed_pages, 0) AS pages_in_clean_table,
-    FORMAT(v_identity_pages, 0) AS identity_pages_created,
-    FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
-    v_batch_count AS total_batches,
+    'COMPLETE - SASS Lexical Link Network with Representatives' AS final_status,
+    FORMAT(v_redirects_processed, 0) AS redirects_processed,
+    FORMAT(v_lexical_links_created, 0) AS lexical_links_created,
+    FORMAT(v_representative_consolidations, 0) AS redirects_consolidated,
+    FORMAT(v_external_redirects, 0) AS external_redirects_excluded,
+    FORMAT(v_unresolved_redirects, 0) AS unresolved_targets_excluded,
+    FORMAT(v_cycle_detected, 0) AS cycles_detected,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
-  -- Sample identity groups showing representative mapping
+  -- Link consolidation analysis
   SELECT 
-    'Sample Identity Groups' AS sample_type,
-    sip.page_title,
-    COUNT(*) AS pages_with_same_title,
-    sip.representative_page_id,
-    rep.page_dag_level AS rep_level,
-    CASE WHEN rep.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS rep_type
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean rep ON sip.representative_page_id = rep.page_id
-  GROUP BY sip.page_title, sip.representative_page_id, rep.page_dag_level, rep.page_is_leaf
-  HAVING COUNT(*) > 1
-  ORDER BY COUNT(*) DESC
-  LIMIT 10;
+    'Representative Consolidation Analysis' AS analysis_type,
+    COUNT(DISTINCT ll_from_title) AS unique_source_titles,
+    COUNT(DISTINCT ll_to_page_id) AS unique_target_representatives,
+    COUNT(*) AS total_lexical_mappings,
+    ROUND(COUNT(*) / COUNT(DISTINCT ll_from_title), 1) AS avg_targets_per_source,
+    ROUND(COUNT(*) / COUNT(DISTINCT ll_to_page_id), 1) AS avg_sources_per_target
+  FROM sass_lexical_link;
   
-  -- Representative selection statistics
+  -- Fragment distribution
   SELECT 
-    'Representative Selection Stats' AS metric_type,
-    COUNT(DISTINCT page_title) AS unique_titles,
-    COUNT(DISTINCT representative_page_id) AS unique_representatives,
-    ROUND(AVG(pages_per_title), 1) AS avg_pages_per_title,
-    MAX(pages_per_title) AS max_pages_per_title
-  FROM (
-    SELECT 
-      page_title,
-      COUNT(*) AS pages_per_title
-    FROM sass_identity_pages
-    GROUP BY page_title
-  ) title_stats;
+    'Fragment Usage Analysis' AS analysis_type,
+    COUNT(*) AS total_links,
+    COUNT(CASE WHEN ll_to_fragment IS NOT NULL THEN 1 END) AS links_with_fragments,
+    COUNT(CASE WHEN ll_to_fragment IS NULL THEN 1 END) AS links_without_fragments,
+    CONCAT(ROUND(100.0 * COUNT(CASE WHEN ll_to_fragment IS NOT NULL THEN 1 END) / COUNT(*), 1), '%') AS fragment_percentage
+  FROM sass_lexical_link;
   
-END//
-
-DELIMITER ;
-
--- ========================================
--- SIMPLE CONVERSION PROCEDURE
--- ========================================
-
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentitySimple;
-
-DELIMITER //
-
-CREATE PROCEDURE ConvertSASSPageCleanWithIdentitySimple()
-BEGIN
-  DECLARE v_start_time DECIMAL(14,3);
-  DECLARE v_total_processed INT DEFAULT 0;
-  DECLARE v_identity_pages INT DEFAULT 0;
-  
-  SET v_start_time = UNIX_TIMESTAMP();
-  
-  -- Clear target tables (disable foreign key checks for entire operation)
-  SET FOREIGN_KEY_CHECKS = 0;
-  TRUNCATE TABLE sass_page_clean;
-  TRUNCATE TABLE sass_identity_pages;
-  
-  -- Create identity pages with all pages and representative mapping
-  INSERT INTO sass_identity_pages (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf,
-    representative_page_id
-  )
+  -- Sample lexical mappings with representative resolution
   SELECT 
-    sp.page_id,
-    clean_page_title_enhanced(sp.page_title) as page_title,
-    sp.page_parent_id,
-    sp.page_root_id,
-    sp.page_dag_level,
-    sp.page_is_leaf,
-    FIRST_VALUE(sp.page_id) OVER (
-      PARTITION BY clean_page_title_enhanced(sp.page_title)
-      ORDER BY sp.page_dag_level DESC, sp.page_is_leaf ASC, sp.page_id ASC
-      ROWS UNBOUNDED PRECEDING
-    ) as representative_page_id
-  FROM sass_page sp;
+    'Sample Lexical Mappings' AS sample_type,
+    CONVERT(sll.ll_from_title, CHAR) AS source_lexical_title,
+    CONVERT(spc.page_title, CHAR) AS target_representative_title,
+    sll.ll_to_page_id AS target_page_id,
+    CONVERT(sll.ll_to_fragment, CHAR) AS fragment,
+    spc.page_dag_level AS target_level,
+    CASE WHEN spc.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS target_type
+  FROM sass_lexical_link sll
+  JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
+  ORDER BY RAND()
+  LIMIT 15;
   
-  SET v_identity_pages = ROW_COUNT();
-  
-  -- Insert only representative pages into sass_page_clean
-  INSERT INTO sass_page_clean (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf
-  )
-  SELECT DISTINCT
-    representative_page_id as page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf
-  FROM sass_identity_pages sip1
-  WHERE sip1.page_id = sip1.representative_page_id;
-  
-  SET v_total_processed = ROW_COUNT();
-  
-  -- Re-enable foreign key checks
-  SET FOREIGN_KEY_CHECKS = 1;
-  
-  -- Summary report
-  SELECT 
-    'Simple Identity Conversion Complete' AS status,
-    FORMAT(v_total_processed, 0) AS pages_converted,
-    FORMAT(v_identity_pages, 0) AS identity_pages_created,
-    FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
-    ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
-
 END//
 
 DELIMITER ;
@@ -410,77 +404,141 @@ DELIMITER ;
 -- UTILITY PROCEDURES
 -- ========================================
 
--- Procedure to test enhanced title cleaning function
-DROP PROCEDURE IF EXISTS TestEnhancedTitleCleaning;
+-- Procedure to test lexical search functionality
+DROP PROCEDURE IF EXISTS TestLexicalSearch;
 
 DELIMITER //
 
-CREATE PROCEDURE TestEnhancedTitleCleaning(
-  IN p_test_title VARCHAR(255)
+CREATE PROCEDURE TestLexicalSearch(
+  IN p_search_term VARCHAR(255)
 )
 BEGIN
+  DECLARE v_cleaned_term VARCHAR(255);
+  
+  SET v_cleaned_term = clean_page_title_enhanced(p_search_term);
+  
+  -- Show search term cleaning
   SELECT 
-    'Enhanced Title Cleaning Test' AS test_type,
-    p_test_title AS original_title,
-    clean_page_title_enhanced(p_test_title) AS cleaned_title,
-    LENGTH(p_test_title) AS original_length,
-    LENGTH(clean_page_title_enhanced(p_test_title)) AS cleaned_length;
+    'Search Term Processing' AS search_info,
+    p_search_term AS original_term,
+    v_cleaned_term AS cleaned_term;
+  
+  -- Find lexical matches
+  SELECT 
+    'Lexical Search Results' AS result_type,
+    CONVERT(sll.ll_from_title, CHAR) AS matching_lexical_title,
+    CONVERT(spc.page_title, CHAR) AS target_page_title,
+    sll.ll_to_page_id AS target_page_id,
+    CONVERT(sll.ll_to_fragment, CHAR) AS target_fragment,
+    spc.page_dag_level AS page_level,
+    CASE WHEN spc.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS page_type
+  FROM sass_lexical_link sll
+  JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
+  WHERE CONVERT(sll.ll_from_title, CHAR) = v_cleaned_term
+  ORDER BY spc.page_dag_level DESC, spc.page_id
+  LIMIT 20;
+
 END//
 
 DELIMITER ;
 
--- Procedure to analyze identity page mapping
-DROP PROCEDURE IF EXISTS AnalyzeIdentityMapping;
+-- Procedure to analyze lexical link quality and patterns
+DROP PROCEDURE IF EXISTS AnalyzeLexicalLinkPatterns;
 
 DELIMITER //
 
-CREATE PROCEDURE AnalyzeIdentityMapping()
+CREATE PROCEDURE AnalyzeLexicalLinkPatterns()
 BEGIN
-  -- Title group size distribution
+  -- Source title pattern analysis
   SELECT 
-    'Identity Group Size Distribution' AS analysis_type,
-    pages_per_title,
-    COUNT(*) AS title_count,
-    ROUND(100.0 * COUNT(*) / (SELECT COUNT(DISTINCT page_title) FROM sass_identity_pages), 1) AS percentage
+    'Source Title Pattern Analysis' AS analysis_type,
+    CASE 
+      WHEN CONVERT(ll_from_title, CHAR) REGEXP '^[A-Z][a-z_]+$' THEN 'Standard Format'
+      WHEN CONVERT(ll_from_title, CHAR) REGEXP '_[0-9]+$' THEN 'Numbered Variant'
+      WHEN CONVERT(ll_from_title, CHAR) REGEXP '[A-Z]{2,}' THEN 'Acronym/Abbreviation'
+      WHEN LENGTH(CONVERT(ll_from_title, CHAR)) <= 3 THEN 'Short Form'
+      ELSE 'Other'
+    END AS pattern_type,
+    COUNT(*) AS link_count,
+    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM sass_lexical_link), 1), '%') AS percentage
+  FROM sass_lexical_link
+  GROUP BY pattern_type
+  ORDER BY COUNT(*) DESC;
+  
+  -- Target consolidation analysis
+  SELECT 
+    'Target Consolidation Analysis' AS analysis_type,
+    sources_per_target,
+    COUNT(*) AS target_count,
+    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(DISTINCT ll_to_page_id) FROM sass_lexical_link), 1), '%') AS percentage
   FROM (
-    SELECT page_title, COUNT(*) AS pages_per_title
-    FROM sass_identity_pages
-    GROUP BY page_title
-  ) AS title_groups
-  GROUP BY pages_per_title
-  ORDER BY pages_per_title;
+    SELECT ll_to_page_id, COUNT(*) AS sources_per_target
+    FROM sass_lexical_link
+    GROUP BY ll_to_page_id
+  ) consolidation_stats
+  GROUP BY sources_per_target
+  ORDER BY sources_per_target DESC
+  LIMIT 10;
   
-  -- Largest identity groups
+  -- Most popular lexical targets
   SELECT 
-    'Largest Identity Groups' AS analysis_type,
-    page_title,
-    COUNT(*) AS pages_in_group,
-    representative_page_id,
-    MAX(page_dag_level) AS max_level,
-    MIN(page_dag_level) AS min_level
-  FROM sass_identity_pages
-  GROUP BY page_title, representative_page_id
+    'Most Popular Lexical Targets' AS popularity_type,
+    CONVERT(spc.page_title, CHAR) AS target_title,
+    COUNT(*) AS incoming_lexical_links,
+    spc.page_dag_level AS page_level,
+    CASE WHEN spc.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS page_type
+  FROM sass_lexical_link sll
+  JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
+  GROUP BY sll.ll_to_page_id
   ORDER BY COUNT(*) DESC
-  LIMIT 15;
+  LIMIT 20;
+
+END//
+
+DELIMITER ;
+
+-- Procedure to validate lexical link integrity
+DROP PROCEDURE IF EXISTS ValidateLexicalLinkIntegrity;
+
+DELIMITER //
+
+CREATE PROCEDURE ValidateLexicalLinkIntegrity()
+BEGIN
+  DECLARE v_orphaned_targets INT DEFAULT 0;
+  DECLARE v_invalid_representatives INT DEFAULT 0;
+  DECLARE v_empty_titles INT DEFAULT 0;
   
-  -- Representative selection analysis
+  -- Check for orphaned target pages
+  SELECT COUNT(*) INTO v_orphaned_targets
+  FROM sass_lexical_link sll
+  WHERE NOT EXISTS (
+    SELECT 1 FROM sass_page_clean spc WHERE spc.page_id = sll.ll_to_page_id
+  );
+  
+  -- Check for targets that are not representatives
+  SELECT COUNT(*) INTO v_invalid_representatives
+  FROM sass_lexical_link sll
+  JOIN sass_identity_pages sip ON sll.ll_to_page_id = sip.page_id
+  WHERE sip.page_id != sip.representative_page_id;
+  
+  -- Check for empty or invalid titles
+  SELECT COUNT(*) INTO v_empty_titles
+  FROM sass_lexical_link sll
+  WHERE CONVERT(sll.ll_from_title, CHAR) = '' 
+     OR CONVERT(sll.ll_from_title, CHAR) = 'Empty_Title'
+     OR sll.ll_from_title IS NULL;
+  
+  -- Report validation results
   SELECT 
-    'Representative Selection Analysis' AS analysis_type,
-    'Categories as representatives' AS selection_type,
-    COUNT(*) AS count
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_is_leaf = 0
-  
-  UNION ALL
-  
-  SELECT 
-    'Representative Selection Analysis',
-    'Articles as representatives',
-    COUNT(*)
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_is_leaf = 1;
+    'Lexical Link Integrity Validation' AS validation_type,
+    v_orphaned_targets AS orphaned_targets,
+    v_invalid_representatives AS non_representative_targets,
+    v_empty_titles AS empty_source_titles,
+    CASE 
+      WHEN v_orphaned_targets = 0 AND v_invalid_representatives = 0 AND v_empty_titles = 0 
+      THEN 'PASS' 
+      ELSE 'FAIL' 
+    END AS validation_status;
 
 END//
 
@@ -491,56 +549,76 @@ DELIMITER ;
 -- ========================================
 
 /*
--- ENHANCED TITLE CLEANING WITH IDENTITY MAPPING
+-- LEXICAL LINK BUILD EXAMPLES WITH REPRESENTATIVE RESOLUTION
 
--- Standard conversion with batching:
-CALL ConvertSASSPageCleanWithIdentity(100000);
+-- Standard build with representative mapping:
+CALL BuildSASSLexicalLinksWithRepresentatives(500000, 5, 1);
 
--- Simple conversion (single query):
-CALL ConvertSASSPageCleanWithIdentitySimple();
+-- Build without progress reports (faster):
+CALL BuildSASSLexicalLinksWithRepresentatives(1000000, 3, 0);
 
--- Test enhanced title cleaning:
-CALL TestEnhancedTitleCleaning('Machine Learning (AI)');
-CALL TestEnhancedTitleCleaning('Artificial—Intelligence, Inc.');
-CALL TestEnhancedTitleCleaning('Computer   Science: "Theory"');
+-- Test lexical search functionality:
+CALL TestLexicalSearch('Machine Learning');
+CALL TestLexicalSearch('AI');
+CALL TestLexicalSearch('ML');
 
--- Analyze identity mapping:
-CALL AnalyzeIdentityMapping();
+-- Analyze lexical patterns:
+CALL AnalyzeLexicalLinkPatterns();
 
--- Check conversion status:
-SELECT * FROM clean_build_state ORDER BY updated_at DESC;
+-- Validate data integrity:
+CALL ValidateLexicalLinkIntegrity();
 
--- Query examples on dual tables:
+-- Check build status:
+SELECT * FROM lexical_build_state ORDER BY updated_at DESC;
 
--- Individual page lookup (sass_page_clean):
-SELECT page_title, page_dag_level, page_is_leaf 
-FROM sass_page_clean 
-WHERE page_id = 12345;
+-- Sample queries on final data:
 
--- Find representative for a page (sass_identity_pages):
-SELECT representative_page_id 
-FROM sass_identity_pages 
-WHERE page_id = 12345;
+-- Find all lexical variations for a page:
+SELECT 
+  CONVERT(sll.ll_from_title, CHAR) as lexical_title,
+  CONVERT(sll.ll_to_fragment, CHAR) as fragment
+FROM sass_lexical_link sll
+WHERE sll.ll_to_page_id = (
+  SELECT page_id FROM sass_page_clean WHERE page_title = 'Machine_learning' LIMIT 1
+);
 
--- Find all pages with same normalized title:
-SELECT page_id, page_dag_level, page_is_leaf
-FROM sass_identity_pages 
-WHERE page_title = 'machine_learning';
+-- Lexical search with fragment support:
+SELECT DISTINCT
+  spc.page_id,
+  CONVERT(spc.page_title, CHAR) as canonical_title,
+  CONVERT(sll.ll_to_fragment, CHAR) as section
+FROM sass_lexical_link sll
+JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
+WHERE CONVERT(sll.ll_from_title, CHAR) = clean_page_title_enhanced('Artificial Intelligence');
 
--- Get representative page details:
-SELECT spc.* 
-FROM sass_identity_pages sip
-JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-WHERE sip.page_id = 12345;
+-- Most consolidated representatives (many lexical sources):
+SELECT 
+  CONVERT(spc.page_title, CHAR) as representative_title,
+  COUNT(DISTINCT sll.ll_from_title) as lexical_variations,
+  COUNT(sll.ll_from_title) as total_lexical_links,
+  GROUP_CONCAT(DISTINCT CONVERT(sll.ll_from_title, CHAR) ORDER BY sll.ll_from_title SEPARATOR ', ') as sample_variations
+FROM sass_lexical_link sll
+JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
+GROUP BY sll.ll_to_page_id
+ORDER BY COUNT(DISTINCT sll.ll_from_title) DESC
+LIMIT 10;
 
-REPRESENTATIVE SELECTION CRITERIA:
-1. Highest page_dag_level (deepest in hierarchy)
-2. If tied, prefer page_is_leaf = 0 (categories over articles)
-3. If still tied, use lowest page_id
+REPRESENTATIVE RESOLUTION BENEFITS:
+- All lexical searches return canonical representative pages
+- Eliminates duplicate results from title variations
+- Maintains redirect chain resolution while ensuring target consistency
+- Supports both direct title matching and fragment-based section references
+- Comprehensive cycle detection prevents infinite redirect loops
 
-PERFORMANCE ESTIMATE:
-- 9M records: ~15-20 minutes total runtime
-- Enhanced normalization: +25% processing time
-- Identity mapping with window functions: +40% for representative calculation
-- Memory usage: ~2GB peak during window function operations
+PERFORMANCE NOTES:
+- Title cleaning adds ~25% processing overhead but ensures consistent matching
+- Representative resolution reduces final record count through consolidation
+- Chain analysis provides quality metrics but can be disabled for faster builds
+- Batch processing handles large redirect tables efficiently
+
+QUALITY METRICS:
+- Representative consolidation ratio shows deduplication effectiveness
+- Fragment usage indicates section-level redirect precision
+- Chain analysis identifies redirect quality and potential cycles
+- Integrity validation ensures referential consistency with core SASS tables
 */
