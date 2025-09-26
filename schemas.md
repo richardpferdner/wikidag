@@ -131,7 +131,7 @@ DAG tree of category pages with normalized page_title
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
 +----------------+------------------+------+-----+--------------+
-| page_id_set    | int unsigned     | NO   | MUL |              |
+| page_id_set    | varchar(255)     | NO   | MUL |              |
 | page_title     | varchar(255)     | NO   | MUL |              |
 | page_parent_id | int              | NO   | PRI | NULL         |
 | page_root_id   | int              | NO   | PRI | NULL         |
