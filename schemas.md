@@ -106,7 +106,7 @@ wiki_top3_levels: 2114 rows
 | grandchild_title   | varchar(255)    | YES  |     | NULL    |
 +--------------------+-----------------+------+-----+---------+
 
-sass_page: 15,119,748 rows
+sass_page: 9,410,101 rows
 DAG tree of category pages with article pages as leaves
 +----------------+------------------+------+-----+--------------+
 | Field          | Type             | Null | Key | Default      |
@@ -124,6 +124,21 @@ Notes:
 - page_dag_level → DAG (directed acyclical graph) tree depth in category hierarchy (0 = root categories: Business, Science, Technology, Engineering, Mathematics)
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - page_root_id → which of the 5 main SASS domains this page belongs to
+
+
+sass_page_clean: 
+DAG tree of category pages with normalized page_title
++----------------+------------------+------+-----+--------------+
+| Field          | Type             | Null | Key | Default      |
++----------------+------------------+------+-----+--------------+
+| page_id_set    | int unsigned     | NO   | MUL |              |
+| page_title     | varchar(255)     | NO   | MUL |              |
+| page_parent_id | int              | NO   | PRI | NULL         |
+| page_root_id   | int              | NO   | PRI | NULL         |
+| page_dag_level | int              | NO   | MUL | NULL         |
+| page_is_leaf   | tinyint(1)       | NO   | MUL | 0            |
++----------------+------------------+------+-----+--------------+
+
 
 sass_lexical_link: 11,483,979 rows
 Lexical links (this string connects to that page)
