@@ -142,9 +142,11 @@ BEGIN
   -- Get total count
   SELECT COUNT(*) INTO v_total_pages FROM sass_page;
   
-  -- Clear target tables
+  -- Clear target tables (disable foreign key checks for truncation)
+  SET FOREIGN_KEY_CHECKS = 0;
   TRUNCATE TABLE sass_page_clean;
   TRUNCATE TABLE sass_identity_pages;
+  SET FOREIGN_KEY_CHECKS = 1;
   
   -- Initialize build state
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
