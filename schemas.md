@@ -125,21 +125,6 @@ Notes:
 - page_is_leaf → TRUE for articles (namespace 0), FALSE for categories (namespace 14) 
 - page_root_id → which of the 5 main SASS domains this page belongs to
 
-
-sass_page_clean: 
-DAG tree of category pages with normalized page_title
-+----------------+------------------+------+-----+--------------+
-| Field          | Type             | Null | Key | Default      |
-+----------------+------------------+------+-----+--------------+
-| page_id_set    | varchar(255)     | NO   | MUL |              |
-| page_title     | varchar(255)     | NO   | MUL |              |
-| page_parent_id | int              | NO   | PRI | NULL         |
-| page_root_id   | int              | NO   | PRI | NULL         |
-| page_dag_level | int              | NO   | MUL | NULL         |
-| page_is_leaf   | tinyint(1)       | NO   | MUL | 0            |
-+----------------+------------------+------+-----+--------------+
-
-
 sass_lexical_link: 11,483,979 rows
 Lexical links (this string connects to that page)
 +----------------+------------------+------+-----+---------+
