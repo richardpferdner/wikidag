@@ -336,9 +336,11 @@ BEGIN
   
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Clear target tables
+  -- Clear target tables (disable foreign key checks for truncation)
+  SET FOREIGN_KEY_CHECKS = 0;
   TRUNCATE TABLE sass_page_clean;
   TRUNCATE TABLE sass_identity_pages;
+  SET FOREIGN_KEY_CHECKS = 1;
   
   -- Single query conversion with enhanced title cleaning
   INSERT INTO sass_page_clean (
