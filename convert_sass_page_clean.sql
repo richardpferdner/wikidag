@@ -1,6 +1,7 @@
--- SASS Wikipedia Page Title Cleaner
+-- SASS Wikipedia Page Title Cleaner with Identity Pages
 -- Converts sass_page to sass_page_clean with standardized titles
--- Applies text normalization for improved matching and search
+-- Creates sass_identity_pages with representative page mapping
+-- Applies enhanced text normalization for improved matching and search
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -23,6 +24,26 @@ CREATE TABLE IF NOT EXISTS sass_page_clean (
   INDEX idx_leaf (page_is_leaf)
 ) ENGINE=InnoDB;
 
+-- Identity pages table with representative page mapping
+CREATE TABLE IF NOT EXISTS sass_identity_pages (
+  page_id INT UNSIGNED NOT NULL,
+  page_title VARCHAR(255) NOT NULL,
+  page_parent_id INT NOT NULL,
+  page_root_id INT NOT NULL,
+  page_dag_level INT NOT NULL,
+  page_is_leaf TINYINT(1) NOT NULL DEFAULT 0,
+  representative_page_id INT UNSIGNED NOT NULL,
+  
+  PRIMARY KEY (page_id),
+  INDEX idx_title (page_title),
+  INDEX idx_parent (page_parent_id),
+  INDEX idx_root (page_root_id),
+  INDEX idx_level (page_dag_level),
+  INDEX idx_leaf (page_is_leaf),
+  INDEX idx_representative (representative_page_id),
+  FOREIGN KEY (representative_page_id) REFERENCES sass_page_clean(page_id)
+) ENGINE=InnoDB;
+
 -- Build progress tracking
 CREATE TABLE IF NOT EXISTS clean_build_state (
   state_key VARCHAR(255) PRIMARY KEY,
@@ -32,13 +53,13 @@ CREATE TABLE IF NOT EXISTS clean_build_state (
 ) ENGINE=InnoDB;
 
 -- ========================================
--- TITLE CLEANING FUNCTION
+-- ENHANCED TITLE CLEANING FUNCTION
 -- ========================================
 
 DELIMITER //
 
--- Function to clean page titles according to specifications
-CREATE FUNCTION IF NOT EXISTS clean_page_title(
+-- Function to clean page titles with enhanced normalization
+CREATE FUNCTION IF NOT EXISTS clean_page_title_enhanced(
   original_title VARCHAR(255)
 ) RETURNS VARCHAR(255)
 READS SQL DATA
@@ -51,25 +72,36 @@ BEGIN
   -- Step 1: Convert whitespace variations to single underscore
   SET cleaned_title = REGEXP_REPLACE(cleaned_title, '\\s+', '_');
   
-  -- Step 2: Remove all quotes
-  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[''''""„‚"'']', '');
+  -- Step 2: Convert parentheses to underscores
+  SET cleaned_title = REPLACE(cleaned_title, '(', '_');
+  SET cleaned_title = REPLACE(cleaned_title, ')', '_');
   
-  -- Step 3: Convert currency to text
+  -- Step 3: Convert various dashes to underscores (em-dash, en-dash, hyphen)
+  SET cleaned_title = REPLACE(cleaned_title, '—', '_');  -- em-dash
+  SET cleaned_title = REPLACE(cleaned_title, '–', '_');  -- en-dash
+  SET cleaned_title = REPLACE(cleaned_title, '-', '_');  -- hyphen
+  
+  -- Step 4: Remove quotes, commas, and periods
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[''''""„‚"'']', '');
+  SET cleaned_title = REPLACE(cleaned_title, ',', '');
+  SET cleaned_title = REPLACE(cleaned_title, '.', '');
+  
+  -- Step 5: Convert currency to text (preserve existing functionality)
   SET cleaned_title = REPLACE(cleaned_title, '€', 'Euro');
   SET cleaned_title = REPLACE(cleaned_title, '£', 'Pound');
   SET cleaned_title = REPLACE(cleaned_title, '¥', 'Yen');
   SET cleaned_title = REPLACE(cleaned_title, '$', 'Dollar');
   
-  -- Step 4: Remove specific symbols
+  -- Step 6: Remove specific symbols
   SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[§©®™]', '');
   
-  -- Step 5: Replace punctuation clusters with single underscore
-  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[!@#%^&*+={}|;:<>?,\\/]+', '_');
+  -- Step 7: Replace remaining punctuation clusters with single underscore
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[!@#%^&*+={}|;:<>?\\/]+', '_');
   
-  -- Step 6: Convert multiple underscores to single underscore
+  -- Step 8: Convert multiple underscores to single underscore
   SET cleaned_title = REGEXP_REPLACE(cleaned_title, '_{2,}', '_');
   
-  -- Step 7: Trim leading and trailing underscores
+  -- Step 9: Trim leading and trailing underscores
   SET cleaned_title = TRIM(BOTH '_' FROM cleaned_title);
   
   -- Ensure not empty
@@ -86,11 +118,11 @@ DELIMITER ;
 -- MAIN CONVERSION PROCEDURE
 -- ========================================
 
-DROP PROCEDURE IF EXISTS ConvertSASSPageClean;
+DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentity;
 
 DELIMITER //
 
-CREATE PROCEDURE ConvertSASSPageClean(
+CREATE PROCEDURE ConvertSASSPageCleanWithIdentity(
   IN p_batch_size INT
 )
 BEGIN
@@ -100,6 +132,7 @@ BEGIN
   DECLARE v_batch_count INT DEFAULT 0;
   DECLARE v_last_page_id INT DEFAULT 0;
   DECLARE v_continue TINYINT(1) DEFAULT 1;
+  DECLARE v_identity_pages INT DEFAULT 0;
   
   -- Set defaults
   IF p_batch_size IS NULL THEN SET p_batch_size = 100000; END IF;
@@ -109,28 +142,29 @@ BEGIN
   -- Get total count
   SELECT COUNT(*) INTO v_total_pages FROM sass_page;
   
-  -- Clear target table
+  -- Clear target tables
   TRUNCATE TABLE sass_page_clean;
+  TRUNCATE TABLE sass_identity_pages;
   
   -- Initialize build state
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 0, 'Starting page title cleaning')
-  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting page title cleaning';
+  VALUES ('build_status', 0, 'Starting page title cleaning with identity mapping')
+  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting page title cleaning with identity mapping';
   
   -- Progress report
   SELECT 
-    'Starting Conversion' AS status,
+    'Starting Dual Table Conversion' AS status,
     FORMAT(v_total_pages, 0) AS total_pages_to_process,
     p_batch_size AS batch_size;
   
   -- ========================================
-  -- BATCH PROCESSING LOOP
+  -- PHASE 1: BUILD sass_page_clean
   -- ========================================
   
   WHILE v_continue = 1 DO
     SET v_batch_count = v_batch_count + 1;
     
-    -- Process batch with title cleaning
+    -- Process batch with enhanced title cleaning
     INSERT INTO sass_page_clean (
       page_id,
       page_title,
@@ -141,7 +175,7 @@ BEGIN
     )
     SELECT 
       sp.page_id,
-      clean_page_title(sp.page_title) as page_title,
+      clean_page_title_enhanced(sp.page_title) as page_title,
       sp.page_parent_id,
       sp.page_root_id,
       sp.page_dag_level,
@@ -156,14 +190,9 @@ BEGIN
     -- Update last processed ID for next batch
     SELECT MAX(page_id) INTO v_last_page_id FROM sass_page_clean;
     
-    -- Update progress
-    INSERT INTO clean_build_state (state_key, state_value) 
-    VALUES ('pages_processed', v_processed_pages)
-    ON DUPLICATE KEY UPDATE state_value = v_processed_pages;
-    
     -- Progress report
     SELECT 
-      CONCAT('Batch ', v_batch_count, ' Complete') AS status,
+      CONCAT('sass_page_clean Batch ', v_batch_count) AS status,
       FORMAT(ROW_COUNT(), 0) AS pages_in_batch,
       FORMAT(v_processed_pages, 0) AS total_processed,
       CONCAT(ROUND(100.0 * v_processed_pages / v_total_pages, 1), '%') AS progress,
@@ -176,48 +205,114 @@ BEGIN
     
   END WHILE;
   
+  -- ========================================
+  -- PHASE 2: BUILD sass_identity_pages
+  -- ========================================
+  
+  INSERT INTO clean_build_state (state_key, state_value, state_text) 
+  VALUES ('build_phase', 2, 'Building identity pages with representative mapping')
+  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Building identity pages with representative mapping';
+  
+  -- Create temporary table for representative page calculation
+  CREATE TEMPORARY TABLE temp_representatives AS
+  SELECT 
+    page_title,
+    page_id as representative_page_id
+  FROM (
+    SELECT 
+      page_title,
+      page_id,
+      page_dag_level,
+      page_is_leaf,
+      ROW_NUMBER() OVER (
+        PARTITION BY page_title 
+        ORDER BY page_dag_level DESC, page_is_leaf ASC, page_id ASC
+      ) as rn
+    FROM sass_page_clean
+  ) ranked
+  WHERE rn = 1;
+  
+  -- Build sass_identity_pages with representative mapping
+  INSERT INTO sass_identity_pages (
+    page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf,
+    representative_page_id
+  )
+  SELECT 
+    spc.page_id,
+    spc.page_title,
+    spc.page_parent_id,
+    spc.page_root_id,
+    spc.page_dag_level,
+    spc.page_is_leaf,
+    tr.representative_page_id
+  FROM sass_page_clean spc
+  JOIN temp_representatives tr ON spc.page_title = tr.page_title;
+  
+  SET v_identity_pages = ROW_COUNT();
+  
+  -- Clean up temporary table
+  DROP TEMPORARY TABLE temp_representatives;
+  
   -- Update final build state
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 100, 'Conversion completed successfully')
-  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Conversion completed successfully';
+  VALUES ('build_status', 100, 'Dual table conversion completed successfully')
+  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Dual table conversion completed successfully';
   
   INSERT INTO clean_build_state (state_key, state_value) 
   VALUES ('total_pages_converted', v_processed_pages)
   ON DUPLICATE KEY UPDATE state_value = v_processed_pages;
+  
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('total_identity_pages', v_identity_pages)
+  ON DUPLICATE KEY UPDATE state_value = v_identity_pages;
   
   -- ========================================
   -- FINAL SUMMARY REPORT
   -- ========================================
   
   SELECT 
-    'COMPLETE - SASS Page Title Cleaning' AS final_status,
+    'COMPLETE - SASS Identity Page Conversion' AS final_status,
     FORMAT(v_total_pages, 0) AS original_pages,
-    FORMAT(v_processed_pages, 0) AS converted_pages,
+    FORMAT(v_processed_pages, 0) AS pages_in_clean_table,
+    FORMAT(v_identity_pages, 0) AS identity_pages_created,
+    FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
     v_batch_count AS total_batches,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
-  -- Sample cleaned titles
+  -- Sample identity groups showing representative mapping
   SELECT 
-    'Sample Title Conversions' AS sample_type,
-    CONVERT(sp.page_title, CHAR) AS original_title,
-    spc.page_title AS cleaned_title,
-    spc.page_dag_level AS level,
-    CASE WHEN spc.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS type
-  FROM sass_page sp
-  JOIN sass_page_clean spc ON sp.page_id = spc.page_id
-  WHERE sp.page_title != spc.page_title
-  ORDER BY RAND()
+    'Sample Identity Groups' AS sample_type,
+    sip.page_title,
+    COUNT(*) AS pages_with_same_title,
+    sip.representative_page_id,
+    rep.page_dag_level AS rep_level,
+    CASE WHEN rep.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS rep_type
+  FROM sass_identity_pages sip
+  JOIN sass_page_clean rep ON sip.representative_page_id = rep.page_id
+  GROUP BY sip.page_title, sip.representative_page_id, rep.page_dag_level, rep.page_is_leaf
+  HAVING COUNT(*) > 1
+  ORDER BY COUNT(*) DESC
   LIMIT 10;
   
-  -- Cleaning statistics
+  -- Representative selection statistics
   SELECT 
-    'Title Cleaning Statistics' AS metric_type,
-    FORMAT(COUNT(*), 0) AS total_titles,
-    FORMAT(SUM(CASE WHEN sp.page_title = spc.page_title THEN 1 ELSE 0 END), 0) AS unchanged_titles,
-    FORMAT(SUM(CASE WHEN sp.page_title != spc.page_title THEN 1 ELSE 0 END), 0) AS modified_titles,
-    CONCAT(ROUND(100.0 * SUM(CASE WHEN sp.page_title != spc.page_title THEN 1 ELSE 0 END) / COUNT(*), 1), '%') AS modification_rate
-  FROM sass_page sp
-  JOIN sass_page_clean spc ON sp.page_id = spc.page_id;
+    'Representative Selection Stats' AS metric_type,
+    COUNT(DISTINCT page_title) AS unique_titles,
+    COUNT(DISTINCT representative_page_id) AS unique_representatives,
+    ROUND(AVG(pages_per_title), 1) AS avg_pages_per_title,
+    MAX(pages_per_title) AS max_pages_per_title
+  FROM (
+    SELECT 
+      page_title,
+      COUNT(*) AS pages_per_title
+    FROM sass_identity_pages
+    GROUP BY page_title
+  ) title_stats;
   
 END//
 
@@ -227,21 +322,23 @@ DELIMITER ;
 -- SIMPLE CONVERSION PROCEDURE
 -- ========================================
 
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanSimple;
+DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentitySimple;
 
 DELIMITER //
 
-CREATE PROCEDURE ConvertSASSPageCleanSimple()
+CREATE PROCEDURE ConvertSASSPageCleanWithIdentitySimple()
 BEGIN
   DECLARE v_start_time DECIMAL(14,3);
   DECLARE v_total_processed INT DEFAULT 0;
+  DECLARE v_identity_pages INT DEFAULT 0;
   
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Clear target table
+  -- Clear target tables
   TRUNCATE TABLE sass_page_clean;
+  TRUNCATE TABLE sass_identity_pages;
   
-  -- Single query conversion with title cleaning
+  -- Single query conversion with enhanced title cleaning
   INSERT INTO sass_page_clean (
     page_id,
     page_title,
@@ -252,7 +349,7 @@ BEGIN
   )
   SELECT 
     sp.page_id,
-    clean_page_title(sp.page_title) as page_title,
+    clean_page_title_enhanced(sp.page_title) as page_title,
     sp.page_parent_id,
     sp.page_root_id,
     sp.page_dag_level,
@@ -261,21 +358,39 @@ BEGIN
   
   SET v_total_processed = ROW_COUNT();
   
+  -- Create identity pages with representative mapping
+  INSERT INTO sass_identity_pages (
+    page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf,
+    representative_page_id
+  )
+  SELECT 
+    spc.page_id,
+    spc.page_title,
+    spc.page_parent_id,
+    spc.page_root_id,
+    spc.page_dag_level,
+    spc.page_is_leaf,
+    FIRST_VALUE(spc.page_id) OVER (
+      PARTITION BY spc.page_title 
+      ORDER BY spc.page_dag_level DESC, spc.page_is_leaf ASC, spc.page_id ASC
+      ROWS UNBOUNDED PRECEDING
+    ) as representative_page_id
+  FROM sass_page_clean spc;
+  
+  SET v_identity_pages = ROW_COUNT();
+  
   -- Summary report
   SELECT 
-    'Simple Conversion Complete' AS status,
+    'Simple Identity Conversion Complete' AS status,
     FORMAT(v_total_processed, 0) AS pages_converted,
+    FORMAT(v_identity_pages, 0) AS identity_pages_created,
+    FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
-  
-  -- Sample results
-  SELECT 
-    CONVERT(sp.page_title, CHAR) AS original_title,
-    spc.page_title AS cleaned_title,
-    spc.page_dag_level AS level
-  FROM sass_page sp
-  JOIN sass_page_clean spc ON sp.page_id = spc.page_id
-  WHERE sp.page_title != spc.page_title
-  LIMIT 5;
 
 END//
 
@@ -285,60 +400,77 @@ DELIMITER ;
 -- UTILITY PROCEDURES
 -- ========================================
 
--- Procedure to test title cleaning function
-DROP PROCEDURE IF EXISTS TestTitleCleaning;
+-- Procedure to test enhanced title cleaning function
+DROP PROCEDURE IF EXISTS TestEnhancedTitleCleaning;
 
 DELIMITER //
 
-CREATE PROCEDURE TestTitleCleaning(
+CREATE PROCEDURE TestEnhancedTitleCleaning(
   IN p_test_title VARCHAR(255)
 )
 BEGIN
   SELECT 
-    'Title Cleaning Test' AS test_type,
+    'Enhanced Title Cleaning Test' AS test_type,
     p_test_title AS original_title,
-    clean_page_title(p_test_title) AS cleaned_title,
+    clean_page_title_enhanced(p_test_title) AS cleaned_title,
     LENGTH(p_test_title) AS original_length,
-    LENGTH(clean_page_title(p_test_title)) AS cleaned_length;
+    LENGTH(clean_page_title_enhanced(p_test_title)) AS cleaned_length;
 END//
 
 DELIMITER ;
 
--- Procedure to analyze cleaning patterns
-DROP PROCEDURE IF EXISTS AnalyzeCleaningPatterns;
+-- Procedure to analyze identity page mapping
+DROP PROCEDURE IF EXISTS AnalyzeIdentityMapping;
 
 DELIMITER //
 
-CREATE PROCEDURE AnalyzeCleaningPatterns()
+CREATE PROCEDURE AnalyzeIdentityMapping()
 BEGIN
-  -- Most common title changes
+  -- Title group size distribution
   SELECT 
-    'Common Title Modifications' AS analysis_type,
-    CONVERT(sp.page_title, CHAR) AS original_pattern,
-    spc.page_title AS cleaned_pattern,
-    COUNT(*) AS occurrence_count
-  FROM sass_page sp
-  JOIN sass_page_clean spc ON sp.page_id = spc.page_id
-  WHERE sp.page_title != spc.page_title
-  GROUP BY sp.page_title, spc.page_title
-  HAVING COUNT(*) > 1
-  ORDER BY COUNT(*) DESC
-  LIMIT 10;
+    'Identity Group Size Distribution' AS analysis_type,
+    pages_per_title,
+    COUNT(*) AS title_count,
+    ROUND(100.0 * COUNT(*) / (SELECT COUNT(DISTINCT page_title) FROM sass_identity_pages), 1) AS percentage
+  FROM (
+    SELECT page_title, COUNT(*) AS pages_per_title
+    FROM sass_identity_pages
+    GROUP BY page_title
+  ) AS title_groups
+  GROUP BY pages_per_title
+  ORDER BY pages_per_title;
   
-  -- Length distribution changes
+  -- Largest identity groups
   SELECT 
-    'Title Length Changes' AS analysis_type,
-    'Original Avg Length' AS metric,
-    ROUND(AVG(LENGTH(CONVERT(sp.page_title, CHAR))), 1) AS value
-  FROM sass_page sp
+    'Largest Identity Groups' AS analysis_type,
+    page_title,
+    COUNT(*) AS pages_in_group,
+    representative_page_id,
+    MAX(page_dag_level) AS max_level,
+    MIN(page_dag_level) AS min_level
+  FROM sass_identity_pages
+  GROUP BY page_title, representative_page_id
+  ORDER BY COUNT(*) DESC
+  LIMIT 15;
+  
+  -- Representative selection analysis
+  SELECT 
+    'Representative Selection Analysis' AS analysis_type,
+    'Categories as representatives' AS selection_type,
+    COUNT(*) AS count
+  FROM sass_identity_pages sip
+  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
+  WHERE spc.page_is_leaf = 0
   
   UNION ALL
   
   SELECT 
-    'Title Length Changes',
-    'Cleaned Avg Length',
-    ROUND(AVG(LENGTH(spc.page_title)), 1)
-  FROM sass_page_clean spc;
+    'Representative Selection Analysis',
+    'Articles as representatives',
+    COUNT(*)
+  FROM sass_identity_pages sip
+  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
+  WHERE spc.page_is_leaf = 1;
 
 END//
 
@@ -349,60 +481,56 @@ DELIMITER ;
 -- ========================================
 
 /*
--- TITLE CLEANING EXAMPLES
+-- ENHANCED TITLE CLEANING WITH IDENTITY MAPPING
 
 -- Standard conversion with batching:
-CALL ConvertSASSPageClean(100000);
+CALL ConvertSASSPageCleanWithIdentity(100000);
 
 -- Simple conversion (single query):
-CALL ConvertSASSPageCleanSimple();
+CALL ConvertSASSPageCleanWithIdentitySimple();
 
--- Test title cleaning function:
-CALL TestTitleCleaning('Machine_learning!!@@');
-CALL TestTitleCleaning('Artificial$$intelligence##');
-CALL TestTitleCleaning('Computer   science???');
+-- Test enhanced title cleaning:
+CALL TestEnhancedTitleCleaning('Machine Learning (AI)');
+CALL TestEnhancedTitleCleaning('Artificial—Intelligence, Inc.');
+CALL TestEnhancedTitleCleaning('Computer   Science: "Theory"');
 
--- Analyze cleaning patterns:
-CALL AnalyzeCleaningPatterns();
+-- Analyze identity mapping:
+CALL AnalyzeIdentityMapping();
 
 -- Check conversion status:
 SELECT * FROM clean_build_state ORDER BY updated_at DESC;
 
--- Sample queries on cleaned data:
+-- Query examples on dual tables:
 
--- Compare original vs cleaned titles:
-SELECT 
-  CONVERT(sp.page_title, CHAR) AS original,
-  spc.page_title AS cleaned,
-  spc.page_dag_level
-FROM sass_page sp
-JOIN sass_page_clean spc ON sp.page_id = spc.page_id
-WHERE sp.page_title != spc.page_title
-LIMIT 20;
+-- Individual page lookup (sass_page_clean):
+SELECT page_title, page_dag_level, page_is_leaf 
+FROM sass_page_clean 
+WHERE page_id = 12345;
 
--- Find pages with significant title changes:
-SELECT 
-  CONVERT(sp.page_title, CHAR) AS original,
-  spc.page_title AS cleaned,
-  LENGTH(CONVERT(sp.page_title, CHAR)) - LENGTH(spc.page_title) AS length_diff
-FROM sass_page sp
-JOIN sass_page_clean spc ON sp.page_id = spc.page_id
-WHERE ABS(LENGTH(CONVERT(sp.page_title, CHAR)) - LENGTH(spc.page_title)) > 5
-ORDER BY length_diff DESC
-LIMIT 15;
+-- Find representative for a page (sass_identity_pages):
+SELECT representative_page_id 
+FROM sass_identity_pages 
+WHERE page_id = 12345;
 
-CLEANING TRANSFORMATIONS:
-1. Whitespace variations → single underscore
-2. All quotes → removed
-3. Currency symbols → text equivalents (€→Euro, £→Pound, ¥→Yen, $→Dollar)
-4. Symbols §©®™ → removed
-5. Punctuation clusters → single underscore
-6. Multiple underscores → single underscore
-7. Leading/trailing underscores → trimmed
+-- Find all pages with same normalized title:
+SELECT page_id, page_dag_level, page_is_leaf
+FROM sass_identity_pages 
+WHERE page_title = 'machine_learning';
 
-PERFORMANCE NOTES:
-- Batched procedure recommended for large datasets
-- Simple procedure faster for sufficient memory
-- Function-based cleaning enables easy customization
-- All original data preserved in sass_page table
+-- Get representative page details:
+SELECT spc.* 
+FROM sass_identity_pages sip
+JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
+WHERE sip.page_id = 12345;
+
+REPRESENTATIVE SELECTION CRITERIA:
+1. Highest page_dag_level (deepest in hierarchy)
+2. If tied, prefer page_is_leaf = 0 (categories over articles)
+3. If still tied, use lowest page_id
+
+PERFORMANCE ESTIMATE:
+- 9M records: ~15-20 minutes total runtime
+- Enhanced normalization: +25% processing time
+- Identity mapping with window functions: +40% for representative calculation
+- Memory usage: ~2GB peak during window function operations
 */
