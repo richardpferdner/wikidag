@@ -52,7 +52,7 @@ CREATE OR REPLACE FUNCTION import_sass_page_clean_from_csv(
     status TEXT,
     rows_imported BIGINT,
     total_time_ms BIGINT
-) AS $$
+) AS $func$
 DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
@@ -83,7 +83,7 @@ BEGIN
        OR page_title IS NULL 
        OR page_title = '';
     
-    -- Insert into main table with conflict resolution
+    -- Insert into main table (no conflict resolution - index-free design)
     INSERT INTO sass_page_clean (
         page_id, page_title, page_parent_id, 
         page_root_id, page_dag_level, page_is_leaf
@@ -91,8 +91,7 @@ BEGIN
     SELECT 
         page_id, page_title, page_parent_id,
         page_root_id, page_dag_level, page_is_leaf
-    FROM sass_page_clean_staging
-    ON CONFLICT (page_id) DO NOTHING;
+    FROM sass_page_clean_staging;
     
     GET DIAGNOSTICS rows_count = ROW_COUNT;
     end_time := clock_timestamp();
@@ -102,7 +101,7 @@ BEGIN
         rows_count,
         EXTRACT(EPOCH FROM (end_time - start_time))::BIGINT * 1000;
 END;
-$$ LANGUAGE plpgsql;
+$func$ LANGUAGE plpgsql;
 
 -- Enhanced chunked import for representative pages
 CREATE OR REPLACE FUNCTION import_sass_page_clean_chunked(
@@ -115,7 +114,7 @@ CREATE OR REPLACE FUNCTION import_sass_page_clean_chunked(
     rows_imported BIGINT,
     chunk_time_ms BIGINT,
     cumulative_rows BIGINT
-) AS $$
+) AS $func$
 DECLARE
     chunk_counter INTEGER := 1;
     chunk_file TEXT;
@@ -173,7 +172,7 @@ BEGIN
         0::BIGINT,
         total_rows;
 END;
-$$ LANGUAGE plpgsql;
+$func$ LANGUAGE plpgsql;
 
 -- Drop existing function to avoid conflicts
 DROP FUNCTION IF EXISTS test_single_import(text);
@@ -221,7 +220,7 @@ RETURNS TABLE (
     value BIGINT,
     expected_range TEXT,
     status TEXT
-) AS $$
+) AS $func$
 DECLARE
     total_count BIGINT;
     level_distribution TEXT;
@@ -283,7 +282,7 @@ BEGIN
         'INFO'::TEXT
     FROM sass_page_clean;
 END;
-$$ LANGUAGE plpgsql;
+$func$ LANGUAGE plpgsql;
 
 -- Optimize table after import (create indexes)
 CREATE OR REPLACE FUNCTION optimize_sass_page_clean_table()
@@ -291,7 +290,7 @@ RETURNS TABLE (
     optimization_step TEXT,
     execution_time_sec NUMERIC,
     status TEXT
-) AS $$
+) AS $func$
 DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
@@ -360,7 +359,7 @@ BEGIN
         EXTRACT(EPOCH FROM (end_time - start_time))::NUMERIC,
         'SUCCESS'::TEXT;
 END;
-$$ LANGUAGE plpgsql;
+$func$ LANGUAGE plpgsql;
 
 -- ========================================
 -- DOCKER INTEGRATION & USAGE INSTRUCTIONS
