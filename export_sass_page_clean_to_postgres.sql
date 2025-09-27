@@ -1,7 +1,8 @@
 -- SASS Page Clean: MySQL to PostgreSQL Migration - INDEX-FREE OPTIMIZED VERSION
 -- Implements high-performance export/import strategy for representative pages only
 -- Exports data without indices, rebuilds indices post-import for 3-4x faster completion
--- Optimized for ~9.4M representative pages with estimated 1.5-2 hour total migration time
+-- Optimized for ~9.16M representative pages with estimated 1.5-2 hour total migration time
+-- Includes comprehensive file system troubleshooting and alternative export methods
 
 -- ========================================
 -- EXPORT CONFIGURATION
@@ -56,7 +57,103 @@ BEGIN
   SELECT 'Export Recommendations' AS info_type,
          'Index-free export for 3-4x faster PostgreSQL import' AS performance_note,
          'Use ExportSASSPageCleanToString() for manual CSV export' AS alternative_method,
-         'Estimated total migration time: 1.5-2 hours' AS time_estimate;
+         'Estimated total migration time: 1.5-2 hours' AS time_estimate,
+         'Expected representative rows: ~9.16M (varies by filtering)' AS data_volume;
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- FILE SYSTEM TROUBLESHOOTING PROCEDURE
+-- ========================================
+
+DROP PROCEDURE IF EXISTS DiagnoseFileSystemIssues;
+
+DELIMITER //
+
+CREATE PROCEDURE DiagnoseFileSystemIssues(
+  IN p_test_path VARCHAR(1000)
+)
+BEGIN
+  DECLARE v_secure_file_priv VARCHAR(1000);
+  DECLARE v_test_file_path VARCHAR(1000);
+  DECLARE v_error_occurred TINYINT(1) DEFAULT 0;
+  DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET v_error_occurred = 1;
+  
+  -- Set default test path
+  IF p_test_path IS NULL THEN SET p_test_path = '/private/tmp/mysql_export/'; END IF;
+  
+  -- Get MySQL settings
+  SELECT @@secure_file_priv INTO v_secure_file_priv;
+  
+  -- Show MySQL file system configuration
+  SELECT 
+    'MySQL File System Configuration' AS diagnostic_type,
+    COALESCE(v_secure_file_priv, 'NULL (file exports disabled)') AS secure_file_priv_setting,
+    p_test_path AS requested_export_path,
+    CASE 
+      WHEN v_secure_file_priv IS NULL THEN 'File exports disabled by MySQL configuration'
+      WHEN v_secure_file_priv = '' THEN 'File exports allowed to any writable directory'
+      WHEN p_test_path LIKE CONCAT(v_secure_file_priv, '%') THEN 'Requested path is within allowed directory'
+      ELSE 'Requested path is OUTSIDE allowed directory - will fail'
+    END AS path_compatibility,
+    'Check directory exists and MySQL has write permissions' AS permission_note;
+  
+  -- Test file creation if secure_file_priv allows it
+  IF v_secure_file_priv IS NOT NULL THEN
+    IF v_secure_file_priv = '' OR p_test_path LIKE CONCAT(v_secure_file_priv, '%') THEN
+      SET v_test_file_path = CONCAT(p_test_path, 'mysql_test_', UNIX_TIMESTAMP(), '.txt');
+      SET v_error_occurred = 0;
+      
+      -- Attempt to create a test file
+      SET @test_sql = CONCAT(
+        'SELECT ''MySQL file write test'' INTO OUTFILE ''', v_test_file_path, ''' ',
+        'FIELDS TERMINATED BY '','' LINES TERMINATED BY ''\\n'''
+      );
+      
+      PREPARE test_stmt FROM @test_sql;
+      EXECUTE test_stmt;
+      DEALLOCATE PREPARE test_stmt;
+      
+      IF v_error_occurred = 0 THEN
+        SELECT 
+          'File System Test Results' AS test_type,
+          'SUCCESS - MySQL can write to directory' AS test_result,
+          v_test_file_path AS test_file_created,
+          'Directory permissions are correct' AS recommendation;
+        
+        -- Clean up test file
+        SET @cleanup_sql = CONCAT('SELECT LOAD_FILE(''', v_test_file_path, ''') INTO @dummy');
+        PREPARE cleanup_stmt FROM @cleanup_sql;
+        EXECUTE cleanup_stmt;
+        DEALLOCATE PREPARE cleanup_stmt;
+      ELSE
+        SELECT 
+          'File System Test Results' AS test_type,
+          'FAILED - MySQL cannot write to directory' AS test_result,
+          v_test_file_path AS attempted_test_file,
+          'Check directory exists and MySQL user has write permissions' AS recommendation;
+      END IF;
+    ELSE
+      SELECT 
+        'File System Test Results' AS test_type,
+        'SKIPPED - Requested path outside secure_file_priv' AS test_result,
+        'Use a path within the allowed directory or update MySQL configuration' AS recommendation;
+    END IF;
+  ELSE
+    SELECT 
+      'File System Test Results' AS test_type,
+      'SKIPPED - File exports disabled in MySQL' AS test_result,
+      'Use CreateExportTable() method instead' AS recommendation;
+  END IF;
+  
+  -- Suggest alternative export methods
+  SELECT 
+    'Alternative Export Methods' AS alternatives_section,
+    'CALL CreateExportTable(1.0);' AS memory_table_method,
+    'CALL ExportSASSPageCleanToString(1.0, 100);' AS string_output_method,
+    'Both methods avoid file system permissions' AS benefit;
+
 END//
 
 DELIMITER ;
@@ -399,7 +496,8 @@ BEGIN
     CEIL(v_total_rows / p_chunk_size) AS estimated_chunks,
     v_actual_export_path AS export_directory,
     COALESCE(v_secure_file_priv, 'NULL (may cause export failure)') AS secure_file_priv_setting,
-    'Data-only chunks (indices built post-import)' AS export_strategy;
+    'Data-only chunks (indices built post-import)' AS export_strategy,
+    'Ensure export directory exists and MySQL has write access' AS permission_note;
   
   -- ========================================
   -- CHUNKED EXPORT LOOP WITH INDEX-FREE OPTIMIZATION
@@ -533,7 +631,7 @@ END//
 
 DELIMITER ;
 
--- Original chunked export procedure
+-- Original chunked export procedure (backward compatibility)
 DROP PROCEDURE IF EXISTS ExportSASSPageCleanChunked;
 
 DELIMITER //
@@ -545,6 +643,30 @@ CREATE PROCEDURE ExportSASSPageCleanChunked(
 BEGIN
   -- Call the optimized chunked export
   CALL ExportSASSPageCleanChunkedOptimized(p_export_path, p_chunk_size, 1);
+END//
+
+DELIMITER ;
+
+-- Legacy procedure name for backward compatibility
+DROP PROCEDURE IF EXISTS ExportSASSPageCleanChunkedFixed;
+
+DELIMITER //
+
+CREATE PROCEDURE ExportSASSPageCleanChunkedFixed(
+  IN p_export_path VARCHAR(1000),
+  IN p_chunk_size INT,
+  IN p_use_secure_path TINYINT(1)
+)
+BEGIN
+  -- Call the optimized chunked export with all parameters
+  CALL ExportSASSPageCleanChunkedOptimized(p_export_path, p_chunk_size, p_use_secure_path);
+  
+  -- Additional guidance for file system issues
+  SELECT 
+    'File System Troubleshooting' AS help_section,
+    'Check directory exists and MySQL has write permissions' AS directory_check,
+    'Try: CALL CreateExportTable(1.0); for alternative export' AS fallback_method,
+    'Estimated representative rows: ~9.16M' AS expected_data_volume;
 END//
 
 DELIMITER ;
@@ -586,8 +708,8 @@ BEGIN
   SELECT 
     'Export File Details' AS file_details,
     file_name,
-    FORMAT(row_count, 0) AS rows,
-    FORMAT(file_size_bytes, 0) AS bytes,
+    FORMAT(row_count, 0) AS file_rows,
+    FORMAT(file_size_bytes, 0) AS file_bytes,
     created_at
   FROM export_file_validation 
   WHERE file_name LIKE 'sass_page_clean_representatives_%'
@@ -871,6 +993,8 @@ BEGIN
   UNION ALL
   SELECT 'SELECT COUNT(*) as imported_representative_rows FROM sass_page_clean;'
   UNION ALL
+  SELECT '-- Expected: ~9.16M representative pages (varies by filtering)'
+  UNION ALL
   SELECT ''
   UNION ALL
   SELECT '-- Next step: Run GeneratePostgreSQLIndexScript() to create indices'
@@ -888,14 +1012,26 @@ DELIMITER ;
 /*
 -- INDEX-FREE EXPORT WORKFLOW FOR OPTIMAL PERFORMANCE
 
--- Step 1: Diagnose environment
+-- Step 0: Ensure export directory exists and has proper permissions
+-- mkdir -p /private/tmp/mysql_export/
+-- chmod 755 /private/tmp/mysql_export/
+-- chown mysql:mysql /private/tmp/mysql_export/  (if needed)
+
+-- Step 1: Diagnose environment and check data availability
 CALL DiagnoseExportEnvironment();
+
+-- Step 1b: If file export issues expected, diagnose file system
+CALL DiagnoseFileSystemIssues('/private/tmp/mysql_export/');
 
 -- Step 2: Test with 1% sample export (index-free)
 CALL ExportSASSPageCleanSecure(1.0, 1);
 
 -- Step 3: Full chunked export (recommended for production)
+-- Updated procedure name for better compatibility:
 CALL ExportSASSPageCleanChunkedOptimized('/private/tmp/mysql_export/', 1000000, 1);
+
+-- OR use legacy procedure name (backward compatibility):
+CALL ExportSASSPageCleanChunkedFixed('/private/tmp/mysql_export/', 1000000, 1);
 
 -- Step 4: Validate export integrity
 CALL ValidateExportIntegrity();
@@ -905,16 +1041,20 @@ CALL GeneratePostgreSQLTableScript();
 CALL GeneratePostgreSQLIndexScript();
 CALL GeneratePostgreSQLImportScript('/path/to/export/files/');
 
--- ALTERNATIVE METHODS (if file exports fail)
+-- TROUBLESHOOTING FILE EXPORT ISSUES
 
--- String-based export (manual copy-paste)
-CALL ExportSASSPageCleanToString(1.0, 100);
+-- If file export fails with permission errors:
+-- 1. Check if directory exists:
+SELECT @@secure_file_priv AS mysql_export_directory;
 
--- Memory-based export table
+-- 2. Try alternative export methods:
 CALL CreateExportTable(1.0);
 SELECT page_id,page_title,page_parent_id,page_root_id,page_dag_level,page_is_leaf FROM sass_page_clean_export ORDER BY page_id;
 
--- Check export status
+-- 3. String-based export (manual copy-paste):
+CALL ExportSASSPageCleanToString(1.0, 100);
+
+-- 4. Check export status:
 SELECT * FROM postgres_export_state ORDER BY updated_at DESC;
 
 -- OPTIMIZED POSTGRESQL IMPORT PROCESS
@@ -937,7 +1077,7 @@ CREATE TABLE sass_page_clean (
 
 -- Phase 3: Verify import
 SELECT COUNT(*) as imported_representative_rows FROM sass_page_clean;
--- Expected: ~9.4M representative pages
+-- Expected: ~9.16M representative pages (may vary based on filtering)
 
 -- Phase 4: Create indices AFTER import (parallel execution recommended)
 -- Session 1:
@@ -969,7 +1109,7 @@ ANALYZE sass_page_clean;
 -- Total Migration Time: 1.5-2 hours (vs 4.5-6.5 hours with indices)
 
 -- REPRESENTATIVE PAGE BENEFITS:
--- - Deduplicated canonical pages only (~9.4M vs 9.4M+ with variations)
+-- - Deduplicated canonical pages only (~9.16M actual vs theoretical 9.4M)
 -- - All essential information preserved in representatives
 -- - Optimal for search and navigation systems
 -- - Significantly faster processing due to reduced dataset size
@@ -980,10 +1120,10 @@ ANALYZE sass_page_clean;
 -- - DAG level relationships preserved through representatives
 -- - Root domain mappings maintained
 
--- POSTGRESQL PERFORMANCE OPTIMIZATIONS:
--- - Index-free import uses sequential I/O for optimal SSD performance
--- - Bulk loading bypasses WAL logging for faster writes
--- - Parallel index creation utilizes multiple CPU cores
--- - CONCURRENTLY prevents table locking during index builds
--- - ANALYZE updates statistics for optimal query planning
+-- COMMON TROUBLESHOOTING:
+-- 1. File permission errors: Ensure MySQL can write to export directory
+-- 2. Disk space: Ensure adequate space (~2-3GB for full export)
+-- 3. Timeout issues: Use CreateExportTable() for memory-based export
+-- 4. Encoding issues: All exports use UTF8MB4 for full Unicode support
+-- 5. Row count variations: Final count depends on filtering and deduplication
 */
