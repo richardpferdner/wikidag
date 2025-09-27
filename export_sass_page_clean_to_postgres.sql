@@ -1035,9 +1035,6 @@ CALL ExportSASSPageCleanSecure(1.0, 1);
 -- Updated procedure name for better compatibility:
 CALL ExportSASSPageCleanChunkedOptimized('/private/tmp/mysql_export/', 1000000, 1);
 
--- OR use legacy procedure name (backward compatibility):
-CALL ExportSASSPageCleanChunkedFixed('/private/tmp/mysql_export/', 1000000, 1);
-
 -- Step 4: Validate export integrity
 CALL ValidateExportIntegrity();
 
