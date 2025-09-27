@@ -378,16 +378,8 @@ BEGIN
   TRUNCATE TABLE sass_identity_pages;
   SET FOREIGN_KEY_CHECKS = 1;
   
-  -- Create identity pages with all pages and hierarchy-preserving representative mapping
-  INSERT INTO sass_identity_pages (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf,
-    representative_page_id
-  )
+  -- Create temporary table with representative mapping to avoid foreign key issues
+  CREATE TEMPORARY TABLE temp_page_mapping AS
   SELECT 
     sp.page_id,
     clean_page_title_enhanced(sp.page_title) as page_title,
@@ -406,9 +398,7 @@ BEGIN
     ) as representative_page_id
   FROM sass_page sp;
   
-  SET v_identity_pages = ROW_COUNT();
-  
-  -- Insert only representative pages into sass_page_clean
+  -- Insert representative pages into sass_page_clean FIRST
   INSERT INTO sass_page_clean (
     page_id,
     page_title,
@@ -424,10 +414,35 @@ BEGIN
     page_root_id,
     page_dag_level,
     page_is_leaf
-  FROM sass_identity_pages sip1
-  WHERE sip1.page_id = sip1.representative_page_id;
+  FROM temp_page_mapping tmp1
+  WHERE tmp1.page_id = tmp1.representative_page_id;
   
   SET v_total_processed = ROW_COUNT();
+  
+  -- Now insert into sass_identity_pages with foreign key constraint satisfied
+  INSERT INTO sass_identity_pages (
+    page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf,
+    representative_page_id
+  )
+  SELECT 
+    page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf,
+    representative_page_id
+  FROM temp_page_mapping;
+  
+  SET v_identity_pages = ROW_COUNT();
+  
+  -- Clean up temporary table
+  DROP TEMPORARY TABLE temp_page_mapping;
   
   -- Count preserved hierarchy representatives
   SELECT COUNT(DISTINCT representative_page_id) INTO v_preserved_hierarchy_pages
