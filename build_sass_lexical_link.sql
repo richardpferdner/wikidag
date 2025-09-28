@@ -1,4 +1,4 @@
--- SASS Wikipedia Lexical Link Builder - Representative Page Resolution
+-- SASS Wikipedia Lexical Link Builder - Representative Page Resolution (MySQL Compatible)
 -- Builds sass_lexical_link table from redirect table with representative page mapping
 -- Applies enhanced text normalization and resolves to canonical representative pages
 -- Uses sass_identity_pages for comprehensive source/target resolution
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS lexical_build_state (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- Chain resolution tracking for redirect cycles
+-- Chain resolution tracking for redirect cycles (simplified for MySQL)
 CREATE TABLE IF NOT EXISTS sass_redirect_chains (
   chain_id INT AUTO_INCREMENT PRIMARY KEY,
   rd_from INT UNSIGNED NOT NULL,
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS sass_redirect_chains (
   chain_length INT NOT NULL,
   final_target_id INT UNSIGNED NULL,
   resolution_status ENUM('resolved', 'cycle_detected', 'external_link', 'unresolved') NOT NULL,
+  visited_path TEXT NULL, -- Store as comma-separated string instead of array
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_from (rd_from),
   INDEX idx_status (resolution_status)
@@ -118,7 +119,7 @@ END//
 DELIMITER ;
 
 -- ========================================
--- MAIN BUILD PROCEDURE WITH REPRESENTATIVE RESOLUTION
+-- MAIN BUILD PROCEDURE WITH REPRESENTATIVE RESOLUTION (MySQL Compatible)
 -- ========================================
 
 DROP PROCEDURE IF EXISTS BuildSASSLexicalLinksWithRepresentatives;
@@ -263,68 +264,57 @@ BEGIN
   END IF;
   
   -- ========================================
-  -- PHASE 3: CHAIN RESOLUTION ANALYSIS
+  -- PHASE 3: SIMPLIFIED CHAIN RESOLUTION ANALYSIS (MySQL Compatible)
   -- ========================================
   
   INSERT INTO lexical_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 3, 'Analyzing redirect chains and cycles')
-  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Analyzing redirect chains and cycles';
+  VALUES ('current_phase', 3, 'Analyzing redirect chains and cycles (simplified)')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Analyzing redirect chains and cycles (simplified)';
   
-  -- Analyze potential redirect chains (for reference and quality control)
-  INSERT INTO sass_redirect_chains (rd_from, rd_to_title, chain_length, final_target_id, resolution_status)
-  WITH RECURSIVE redirect_chain AS (
-    -- Base case: direct redirects
-    SELECT 
-      r.rd_from,
-      CONVERT(r.rd_title, CHAR) as rd_to_title,
-      1 as chain_length,
-      srw.rd_representative_id as final_target_id,
-      CASE 
-        WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
-        WHEN r.rd_interwiki IS NOT NULL THEN 'external_link'
-        ELSE 'unresolved'
-      END as resolution_status,
-      ARRAY[r.rd_from] as visited_pages
-    FROM redirect r
-    LEFT JOIN sass_redirect_work srw ON r.rd_from = srw.rd_from
-    JOIN page sp_from ON r.rd_from = sp_from.page_id
-    JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
-    WHERE r.rd_namespace IN (0, 14)
-      AND sp_from.page_content_model = 'wikitext'
-    
-    UNION ALL
-    
-    -- Recursive case: follow chains up to max depth
-    SELECT 
-      rc.rd_from,
-      CONVERT(r.rd_title, CHAR) as rd_to_title,
-      rc.chain_length + 1,
-      srw.rd_representative_id as final_target_id,
-      CASE 
-        WHEN r.rd_from = ANY(rc.visited_pages) THEN 'cycle_detected'
-        WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
-        WHEN r.rd_interwiki IS NOT NULL THEN 'external_link'
-        WHEN rc.chain_length >= p_max_chain_depth THEN 'unresolved'
-        ELSE 'unresolved'
-      END as resolution_status,
-      ARRAY_APPEND(rc.visited_pages, r.rd_from) as visited_pages
-    FROM redirect_chain rc
-    JOIN page p ON CONVERT(rc.rd_to_title, CHAR) = CONVERT(p.page_title, CHAR)
-    JOIN redirect r ON p.page_id = r.rd_from
-    LEFT JOIN sass_redirect_work srw ON r.rd_from = srw.rd_from
-    WHERE rc.chain_length < p_max_chain_depth
-      AND rc.resolution_status = 'unresolved'
-      AND r.rd_from != ALL(rc.visited_pages)  -- Prevent infinite loops
-  )
+  -- Simple chain analysis without recursive CTEs (MySQL compatible approach)
+  -- Insert direct redirects first
+  INSERT INTO sass_redirect_chains (rd_from, rd_to_title, chain_length, final_target_id, resolution_status, visited_path)
   SELECT 
-    rd_from,
-    rd_to_title,
-    chain_length,
-    final_target_id,
-    resolution_status
-  FROM redirect_chain
-  WHERE resolution_status IN ('resolved', 'cycle_detected', 'external_link')
-     OR chain_length = p_max_chain_depth;
+    r.rd_from,
+    CONVERT(r.rd_title, CHAR) as rd_to_title,
+    1 as chain_length,
+    srw.rd_representative_id as final_target_id,
+    CASE 
+      WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
+      WHEN r.rd_interwiki IS NOT NULL THEN 'external_link'
+      ELSE 'unresolved'
+    END as resolution_status,
+    CAST(r.rd_from AS CHAR) as visited_path  -- Store as string instead of array
+  FROM redirect r
+  LEFT JOIN sass_redirect_work srw ON r.rd_from = srw.rd_from
+  JOIN page sp_from ON r.rd_from = sp_from.page_id
+  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
+  WHERE r.rd_namespace IN (0, 14)
+    AND sp_from.page_content_model = 'wikitext';
+  
+  -- Simple cycle detection using self-joins (limited depth for performance)
+  INSERT INTO sass_redirect_chains (rd_from, rd_to_title, chain_length, final_target_id, resolution_status, visited_path)
+  SELECT DISTINCT
+    r1.rd_from,
+    CONVERT(r2.rd_title, CHAR) as rd_to_title,
+    2 as chain_length,
+    srw.rd_representative_id as final_target_id,
+    CASE 
+      WHEN r1.rd_from = r2.rd_from THEN 'cycle_detected'
+      WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
+      WHEN r2.rd_interwiki IS NOT NULL THEN 'external_link'
+      ELSE 'unresolved'
+    END as resolution_status,
+    CONCAT(CAST(r1.rd_from AS CHAR), ',', CAST(r2.rd_from AS CHAR)) as visited_path
+  FROM redirect r1
+  JOIN page p1 ON CONVERT(r1.rd_title, CHAR) = CONVERT(p1.page_title, CHAR)
+  JOIN redirect r2 ON p1.page_id = r2.rd_from
+  LEFT JOIN sass_redirect_work srw ON r2.rd_from = srw.rd_from
+  WHERE NOT EXISTS (
+    SELECT 1 FROM sass_redirect_chains src WHERE src.rd_from = r1.rd_from AND src.chain_length = 1
+  )
+  AND r1.rd_namespace IN (0, 14)
+  AND r2.rd_namespace IN (0, 14);
   
   -- Count cycle detections
   SELECT COUNT(*) INTO v_cycle_detected
@@ -333,7 +323,7 @@ BEGIN
   
   IF p_enable_progress_reports = 1 THEN
     SELECT 
-      'Phase 3: Chain Analysis' AS status,
+      'Phase 3: Chain Analysis (Simplified)' AS status,
       FORMAT(v_cycle_detected, 0) AS redirect_cycles_detected,
       FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE resolution_status = 'resolved'), 0) AS chains_resolved,
       FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE resolution_status = 'external_link'), 0) AS external_chains,
@@ -354,7 +344,7 @@ BEGIN
   -- ========================================
   
   SELECT 
-    'COMPLETE - SASS Lexical Link Network with Representatives' AS final_status,
+    'COMPLETE - SASS Lexical Link Network with Representatives (MySQL)' AS final_status,
     FORMAT(v_redirects_processed, 0) AS redirects_processed,
     FORMAT(v_lexical_links_created, 0) AS lexical_links_created,
     FORMAT(v_representative_consolidations, 0) AS redirects_consolidated,
@@ -549,7 +539,7 @@ DELIMITER ;
 -- ========================================
 
 /*
--- LEXICAL LINK BUILD EXAMPLES WITH REPRESENTATIVE RESOLUTION
+-- LEXICAL LINK BUILD EXAMPLES WITH REPRESENTATIVE RESOLUTION (MySQL Compatible)
 
 -- Standard build with representative mapping:
 CALL BuildSASSLexicalLinksWithRepresentatives(500000, 5, 1);
@@ -603,6 +593,13 @@ GROUP BY sll.ll_to_page_id
 ORDER BY COUNT(DISTINCT sll.ll_from_title) DESC
 LIMIT 10;
 
+MYSQL COMPATIBILITY CHANGES:
+- Removed PostgreSQL ARRAY syntax and replaced with comma-separated strings
+- Simplified recursive CTE logic with iterative approach using self-joins
+- Used TEXT field for visited_path instead of array type
+- Simplified chain analysis to 2-level depth for performance
+- All array operations converted to string concatenation
+
 REPRESENTATIVE RESOLUTION BENEFITS:
 - All lexical searches return canonical representative pages
 - Eliminates duplicate results from title variations
@@ -613,12 +610,12 @@ REPRESENTATIVE RESOLUTION BENEFITS:
 PERFORMANCE NOTES:
 - Title cleaning adds ~25% processing overhead but ensures consistent matching
 - Representative resolution reduces final record count through consolidation
-- Chain analysis provides quality metrics but can be disabled for faster builds
+- Simplified chain analysis provides quality metrics with better MySQL performance
 - Batch processing handles large redirect tables efficiently
 
 QUALITY METRICS:
 - Representative consolidation ratio shows deduplication effectiveness
 - Fragment usage indicates section-level redirect precision
-- Chain analysis identifies redirect quality and potential cycles
+- Chain analysis identifies redirect quality and potential cycles (simplified)
 - Integrity validation ensures referential consistency with core SASS tables
 */
