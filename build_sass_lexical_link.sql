@@ -539,7 +539,19 @@ DELIMITER ;
 -- ========================================
 
 /*
--- LEXICAL LINK BUILD EXAMPLES WITH REPRESENTATIVE RESOLUTION (MySQL Compatible)
+-- CRITICAL PREREQUISITES - RUN THESE FIRST:
+
+-- Step 1: Ensure sass_page exists (from build_sass_page.sql)
+-- Step 2: Create sass_page_clean and sass_identity_pages tables:
+source convert_sass_page_clean.sql
+CALL ConvertSASSPageCleanWithIdentitySimple();
+
+-- Step 3: Verify prerequisites exist:
+SELECT COUNT(*) as sass_page_clean_count FROM sass_page_clean;
+SELECT COUNT(*) as sass_identity_pages_count FROM sass_identity_pages;
+-- Both should return >0 rows before proceeding
+
+-- LEXICAL LINK BUILD EXAMPLES (MySQL Compatible)
 
 -- Standard build with representative mapping:
 CALL BuildSASSLexicalLinksWithRepresentatives(500000, 5, 1);
@@ -547,7 +559,11 @@ CALL BuildSASSLexicalLinksWithRepresentatives(500000, 5, 1);
 -- Build without progress reports (faster):
 CALL BuildSASSLexicalLinksWithRepresentatives(1000000, 3, 0);
 
--- Test lexical search functionality:
+-- Verify build completed successfully:
+SELECT * FROM lexical_build_state WHERE state_key = 'build_status';
+-- Should show: state_value = 100, state_text = 'completed successfully'
+
+-- Test lexical search functionality (after successful build):
 CALL TestLexicalSearch('Machine Learning');
 CALL TestLexicalSearch('AI');
 CALL TestLexicalSearch('ML');
@@ -558,10 +574,14 @@ CALL AnalyzeLexicalLinkPatterns();
 -- Validate data integrity:
 CALL ValidateLexicalLinkIntegrity();
 
--- Check build status:
+-- Check build status and statistics:
 SELECT * FROM lexical_build_state ORDER BY updated_at DESC;
 
--- Sample queries on final data:
+-- SAMPLE QUERIES (run only after successful build):
+
+-- Check if data exists before running queries:
+SELECT COUNT(*) as total_lexical_links FROM sass_lexical_link;
+-- Should be >0 before running sample queries
 
 -- Find all lexical variations for a page:
 SELECT 
@@ -579,43 +599,60 @@ SELECT DISTINCT
   CONVERT(sll.ll_to_fragment, CHAR) as section
 FROM sass_lexical_link sll
 JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
-WHERE CONVERT(sll.ll_from_title, CHAR) = clean_page_title_enhanced('Artificial Intelligence');
+WHERE CONVERT(sll.ll_from_title, CHAR) = clean_page_title_enhanced('Artificial Intelligence')
+LIMIT 10;
 
 -- Most consolidated representatives (many lexical sources):
 SELECT 
   CONVERT(spc.page_title, CHAR) as representative_title,
   COUNT(DISTINCT sll.ll_from_title) as lexical_variations,
-  COUNT(sll.ll_from_title) as total_lexical_links,
-  GROUP_CONCAT(DISTINCT CONVERT(sll.ll_from_title, CHAR) ORDER BY sll.ll_from_title SEPARATOR ', ') as sample_variations
+  COUNT(sll.ll_from_title) as total_lexical_links
 FROM sass_lexical_link sll
 JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
 GROUP BY sll.ll_to_page_id
 ORDER BY COUNT(DISTINCT sll.ll_from_title) DESC
 LIMIT 10;
 
+-- TROUBLESHOOTING COMMON ISSUES:
+
+-- Issue: "0 redirects processed"
+-- Solution: sass_identity_pages table missing - run prerequisites first
+
+-- Issue: "Unknown column" errors
+-- Solution: Drop and recreate tables, re-source this file
+
+-- Issue: No lexical links created
+-- Solution: Check if redirect table exists and has data:
+SELECT COUNT(*) FROM redirect WHERE rd_interwiki IS NULL LIMIT 1;
+
 MYSQL COMPATIBILITY CHANGES:
-- Removed PostgreSQL ARRAY syntax and replaced with comma-separated strings
-- Simplified recursive CTE logic with iterative approach using self-joins
+- Removed PostgreSQL ARRAY syntax, replaced with comma-separated strings
+- Simplified recursive CTE with 2-level self-joins (not comprehensive chain analysis)
 - Used TEXT field for visited_path instead of array type
-- Simplified chain analysis to 2-level depth for performance
-- All array operations converted to string concatenation
+- Limited cycle detection to 2 levels for MySQL performance
 
 REPRESENTATIVE RESOLUTION BENEFITS:
 - All lexical searches return canonical representative pages
 - Eliminates duplicate results from title variations
 - Maintains redirect chain resolution while ensuring target consistency
 - Supports both direct title matching and fragment-based section references
-- Comprehensive cycle detection prevents infinite redirect loops
+- Basic cycle detection for 2-level chains (not comprehensive)
 
 PERFORMANCE NOTES:
 - Title cleaning adds ~25% processing overhead but ensures consistent matching
 - Representative resolution reduces final record count through consolidation
-- Simplified chain analysis provides quality metrics with better MySQL performance
+- Simplified chain analysis (2-level only) for MySQL compatibility
 - Batch processing handles large redirect tables efficiently
+- Estimated runtime: 10-30 minutes depending on redirect table size
 
 QUALITY METRICS:
 - Representative consolidation ratio shows deduplication effectiveness
 - Fragment usage indicates section-level redirect precision
-- Chain analysis identifies redirect quality and potential cycles (simplified)
+- Basic chain analysis identifies simple redirect cycles (2-level depth)
 - Integrity validation ensures referential consistency with core SASS tables
+
+EXPECTED RESULTS:
+- Typical lexical links created: 1-5M (depends on redirect coverage)
+- Representative consolidation: 10-30% reduction from duplicates
+- Cycle detection: Usually <1% of redirects in simple cycles
 */
