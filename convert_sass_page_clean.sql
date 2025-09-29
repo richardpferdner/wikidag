@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS sass_work (
   root_id INT NOT NULL,
   level INT NOT NULL,
   
-  PRIMARY KEY (page_id, parent_id),
+  PRIMARY KEY (page_id, parent_id, level),  -- Allow same page-parent at different levels
   INDEX idx_level (level),
   INDEX idx_root (root_id),
   INDEX idx_parent (parent_id)
