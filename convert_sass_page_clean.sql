@@ -2,6 +2,7 @@
 -- Converts sass_page to sass_page_clean with standardized titles
 -- Creates sass_identity_pages with representative page mapping
 -- PRESERVES original Wiki_top3_levels page IDs for levels 0-2
+-- FIXES parent_id references to maintain strict level-parent relationships
 -- Applies enhanced text normalization for improved matching and search
 
 -- ========================================
@@ -59,35 +60,36 @@ CREATE TABLE IF NOT EXISTS clean_build_state (
 
 DELIMITER //
 
--- Function to clean page titles with enhanced normalization
-CREATE FUNCTION IF NOT EXISTS clean_page_title_enhanced(
-  original_title VARCHAR(255)
-) RETURNS VARCHAR(255)
-READS SQL DATA
+DROP FUNCTION IF EXISTS clean_page_title_enhanced//
+
+CREATE FUNCTION clean_page_title_enhanced(original_title VARCHAR(255))
+RETURNS VARCHAR(255)
 DETERMINISTIC
 BEGIN
   DECLARE cleaned_title VARCHAR(255);
   
   SET cleaned_title = original_title;
   
-  -- Step 1: Convert whitespace variations to single underscore
+  -- Step 1: Normalize whitespace (spaces, tabs, newlines)
   SET cleaned_title = REGEXP_REPLACE(cleaned_title, '\\s+', '_');
   
-  -- Step 2: Convert parentheses to underscores
-  SET cleaned_title = REPLACE(cleaned_title, '(', '_');
-  SET cleaned_title = REPLACE(cleaned_title, ')', '_');
+  -- Step 2: Remove parenthetical disambiguation
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '\\s*\\([^)]*\\)\\s*', '');
   
-  -- Step 3: Convert various dashes to underscores (em-dash, en-dash, hyphen)
-  SET cleaned_title = REPLACE(cleaned_title, '—', '_');  -- em-dash
-  SET cleaned_title = REPLACE(cleaned_title, '–', '_');  -- en-dash
-  SET cleaned_title = REPLACE(cleaned_title, '-', '_');  -- hyphen
+  -- Step 3: Normalize common variations
+  SET cleaned_title = REPLACE(cleaned_title, '–', '-');
+  SET cleaned_title = REPLACE(cleaned_title, '—', '-');
+  SET cleaned_title = REPLACE(cleaned_title, ''', '\'');
+  SET cleaned_title = REPLACE(cleaned_title, ''', '\'');
+  SET cleaned_title = REPLACE(cleaned_title, '"', '"');
+  SET cleaned_title = REPLACE(cleaned_title, '"', '"');
   
-  -- Step 4: Remove quotes, commas, and periods
-  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '[''''""„‚"'']', '');
-  SET cleaned_title = REPLACE(cleaned_title, ',', '');
-  SET cleaned_title = REPLACE(cleaned_title, '.', '');
+  -- Step 4: Remove common prefixes/suffixes
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '^(The|A|An)_', '');
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '_(article|page|category)$', '', 'i');
+  SET cleaned_title = REGEXP_REPLACE(cleaned_title, '_(disambiguation)$', '');
   
-  -- Step 5: Convert currency to text (preserve existing functionality)
+  -- Step 5: Convert currency to text
   SET cleaned_title = REPLACE(cleaned_title, '€', 'Euro');
   SET cleaned_title = REPLACE(cleaned_title, '£', 'Pound');
   SET cleaned_title = REPLACE(cleaned_title, '¥', 'Yen');
@@ -116,12 +118,157 @@ END//
 DELIMITER ;
 
 -- ========================================
+-- HELPER FUNCTION: FIND VALID PARENT
+-- ========================================
+
+DELIMITER //
+
+DROP FUNCTION IF EXISTS find_valid_parent//
+
+CREATE FUNCTION find_valid_parent(
+  p_page_id INT UNSIGNED,
+  p_page_level INT,
+  p_root_id INT
+)
+RETURNS INT UNSIGNED
+DETERMINISTIC
+READS SQL DATA
+BEGIN
+  DECLARE v_parent_id INT UNSIGNED DEFAULT 0;
+  
+  -- Level 0 has no parent
+  IF p_page_level = 0 THEN
+    RETURN 0;
+  END IF;
+  
+  -- Try to find any page at level N-1 with same root_id
+  SELECT page_id INTO v_parent_id
+  FROM sass_page_clean
+  WHERE page_dag_level = p_page_level - 1
+    AND page_root_id = p_root_id
+  ORDER BY page_id ASC
+  LIMIT 1;
+  
+  -- If no parent found at correct level, return root_id
+  IF v_parent_id IS NULL THEN
+    RETURN p_root_id;
+  END IF;
+  
+  RETURN v_parent_id;
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- PARENT REMAPPING PROCEDURE
+-- ========================================
+
+DELIMITER //
+
+DROP PROCEDURE IF EXISTS remap_parent_ids//
+
+CREATE PROCEDURE remap_parent_ids()
+BEGIN
+  DECLARE v_current_level INT DEFAULT 3;
+  DECLARE v_max_level INT DEFAULT 0;
+  DECLARE v_fixed_count INT DEFAULT 0;
+  DECLARE v_total_fixed INT DEFAULT 0;
+  
+  -- Get max level
+  SELECT MAX(page_dag_level) INTO v_max_level FROM sass_page_clean;
+  
+  -- Process each level starting from 3
+  WHILE v_current_level <= v_max_level DO
+    
+    -- Create temp table for parent remapping at this level
+    CREATE TEMPORARY TABLE temp_parent_fixes AS
+    SELECT 
+      c.page_id,
+      c.page_parent_id AS old_parent_id,
+      COALESCE(
+        -- Case 1: Parent exists and is at correct level
+        CASE 
+          WHEN p.page_id IS NOT NULL AND p.page_dag_level = v_current_level - 1 
+          THEN c.page_parent_id
+          ELSE NULL
+        END,
+        -- Case 2: Parent exists but wrong level, find its representative
+        CASE
+          WHEN p.page_id IS NOT NULL
+          THEN (
+            SELECT representative_page_id 
+            FROM sass_identity_pages 
+            WHERE page_id = c.page_parent_id
+            LIMIT 1
+          )
+          ELSE NULL
+        END,
+        -- Case 3: Parent doesn't exist, check if it has a representative
+        (
+          SELECT spc.page_id
+          FROM sass_identity_pages sip
+          JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
+          WHERE sip.page_id = c.page_parent_id
+            AND spc.page_dag_level = v_current_level - 1
+          LIMIT 1
+        ),
+        -- Case 4: Find any valid parent at level N-1
+        find_valid_parent(c.page_id, c.page_dag_level, c.page_root_id)
+      ) AS new_parent_id
+    FROM sass_page_clean c
+    LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+    WHERE c.page_dag_level = v_current_level
+      AND (
+        p.page_id IS NULL 
+        OR p.page_dag_level != v_current_level - 1
+      );
+    
+    -- Update parent_ids that need fixing
+    UPDATE sass_page_clean c
+    INNER JOIN temp_parent_fixes f ON c.page_id = f.page_id
+    SET c.page_parent_id = f.new_parent_id
+    WHERE f.new_parent_id IS NOT NULL 
+      AND f.new_parent_id != f.old_parent_id;
+    
+    SET v_fixed_count = ROW_COUNT();
+    SET v_total_fixed = v_total_fixed + v_fixed_count;
+    
+    -- Log progress
+    IF v_fixed_count > 0 THEN
+      INSERT INTO clean_build_state (state_key, state_value, state_text)
+      VALUES (CONCAT('level_', v_current_level, '_parent_fixes'), v_fixed_count, 
+              CONCAT('Fixed ', v_fixed_count, ' parent references at level ', v_current_level))
+      ON DUPLICATE KEY UPDATE 
+        state_value = v_fixed_count,
+        state_text = CONCAT('Fixed ', v_fixed_count, ' parent references at level ', v_current_level);
+    END IF;
+    
+    DROP TEMPORARY TABLE temp_parent_fixes;
+    SET v_current_level = v_current_level + 1;
+  END WHILE;
+  
+  -- Final summary
+  INSERT INTO clean_build_state (state_key, state_value, state_text)
+  VALUES ('total_parent_fixes', v_total_fixed, CONCAT('Total parent references fixed: ', v_total_fixed))
+  ON DUPLICATE KEY UPDATE 
+    state_value = v_total_fixed,
+    state_text = CONCAT('Total parent references fixed: ', v_total_fixed);
+    
+  SELECT 
+    'Parent Remapping Complete' AS status,
+    FORMAT(v_total_fixed, 0) AS total_parent_fixes,
+    v_max_level AS max_level_processed;
+END//
+
+DELIMITER ;
+
+-- ========================================
 -- MAIN CONVERSION PROCEDURE WITH HIERARCHY PRESERVATION
 -- ========================================
 
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentity;
-
 DELIMITER //
+
+DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentity//
 
 CREATE PROCEDURE ConvertSASSPageCleanWithIdentity(
   IN p_batch_size INT
@@ -144,7 +291,7 @@ BEGIN
   -- Get total count
   SELECT COUNT(*) INTO v_total_pages FROM sass_page;
   
-  -- Clear target tables (disable foreign key checks for truncation)
+  -- Clear target tables
   SET FOREIGN_KEY_CHECKS = 0;
   TRUNCATE TABLE sass_page_clean;
   TRUNCATE TABLE sass_identity_pages;
@@ -152,12 +299,12 @@ BEGIN
   
   -- Initialize build state
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 0, 'Starting page title cleaning with hierarchy preservation')
-  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting page title cleaning with hierarchy preservation';
+  VALUES ('build_status', 0, 'Starting conversion with parent remapping')
+  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting conversion with parent remapping';
   
   -- Progress report
   SELECT 
-    'Starting Dual Table Conversion with Hierarchy Preservation' AS status,
+    'Starting Conversion with Parent Remapping' AS status,
     FORMAT(v_total_pages, 0) AS total_pages_to_process,
     p_batch_size AS batch_size;
   
@@ -210,14 +357,14 @@ BEGIN
   END WHILE;
   
   -- ========================================
-  -- PHASE 2: BUILD sass_identity_pages WITH HIERARCHY PRESERVATION
+  -- PHASE 2: BUILD sass_identity_pages
   -- ========================================
   
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 2, 'Building identity pages with hierarchy-preserving representative mapping')
-  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Building identity pages with hierarchy-preserving representative mapping';
+  VALUES ('build_phase', 2, 'Building identity pages with hierarchy preservation')
+  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Building identity pages with hierarchy preservation';
   
-  -- Create temporary table for representative page calculation with hierarchy preservation
+  -- Create temporary table for representative page calculation
   CREATE TEMPORARY TABLE temp_representatives AS
   SELECT 
     page_title,
@@ -231,7 +378,7 @@ BEGIN
       ROW_NUMBER() OVER (
         PARTITION BY page_title 
         ORDER BY 
-          CASE WHEN page_dag_level <= 2 THEN 0 ELSE 1 END ASC,  -- Prioritize original hierarchy pages (levels 0-2)
+          CASE WHEN page_dag_level <= 2 THEN 0 ELSE 1 END ASC,
           page_dag_level DESC, 
           page_is_leaf ASC, 
           page_id ASC
@@ -246,7 +393,7 @@ BEGIN
   JOIN sass_page_clean spc ON tr.representative_page_id = spc.page_id
   WHERE spc.page_dag_level <= 2;
   
-  -- Build sass_identity_pages with hierarchy-preserving representative mapping
+  -- Build sass_identity_pages
   INSERT INTO sass_identity_pages (
     page_id,
     page_title,
@@ -272,14 +419,34 @@ BEGIN
   -- Clean up temporary table
   DROP TEMPORARY TABLE temp_representatives;
   
-  -- Update final build state
+  -- ========================================
+  -- PHASE 3: REMAP PARENT IDs
+  -- ========================================
+  
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 100, 'Dual table conversion with hierarchy preservation completed successfully')
-  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Dual table conversion with hierarchy preservation completed successfully';
+  VALUES ('build_phase', 3, 'Remapping parent IDs to maintain level relationships')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Remapping parent IDs to maintain level relationships';
+  
+  -- Remove non-representative pages from sass_page_clean
+  DELETE FROM sass_page_clean
+  WHERE page_id NOT IN (
+    SELECT DISTINCT representative_page_id FROM sass_identity_pages
+  );
+  
+  -- Now remap parent IDs
+  CALL remap_parent_ids();
+  
+  -- ========================================
+  -- FINAL VALIDATION AND REPORTING
+  -- ========================================
+  
+  INSERT INTO clean_build_state (state_key, state_value, state_text) 
+  VALUES ('build_status', 100, 'Conversion with parent remapping completed successfully')
+  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Conversion with parent remapping completed successfully';
   
   INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('total_pages_converted', v_processed_pages)
-  ON DUPLICATE KEY UPDATE state_value = v_processed_pages;
+  VALUES ('total_pages_converted', (SELECT COUNT(*) FROM sass_page_clean))
+  ON DUPLICATE KEY UPDATE state_value = (SELECT COUNT(*) FROM sass_page_clean);
   
   INSERT INTO clean_build_state (state_key, state_value) 
   VALUES ('total_identity_pages', v_identity_pages)
@@ -289,79 +456,49 @@ BEGIN
   VALUES ('preserved_hierarchy_representatives', v_preserved_hierarchy_pages)
   ON DUPLICATE KEY UPDATE state_value = v_preserved_hierarchy_pages;
   
-  -- ========================================
-  -- FINAL SUMMARY REPORT WITH HIERARCHY PRESERVATION METRICS
-  -- ========================================
-  
+  -- Final summary report
   SELECT 
-    'COMPLETE - SASS Identity Page Conversion with Hierarchy Preservation' AS final_status,
+    'COMPLETE - Conversion with Parent Remapping' AS final_status,
     FORMAT(v_total_pages, 0) AS original_pages,
-    FORMAT(v_processed_pages, 0) AS pages_in_clean_table,
+    FORMAT((SELECT COUNT(*) FROM sass_page_clean), 0) AS pages_in_clean_table,
     FORMAT(v_identity_pages, 0) AS identity_pages_created,
     FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
     FORMAT(v_preserved_hierarchy_pages, 0) AS hierarchy_representatives_preserved,
     v_batch_count AS total_batches,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
-  -- Hierarchy preservation validation
+  -- Validation: Check for orphaned parents
   SELECT 
-    'Hierarchy Preservation Validation' AS validation_type,
-    spc.page_dag_level,
-    COUNT(*) AS pages_at_level,
-    COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS representatives_at_level,
-    CONCAT(ROUND(100.0 * COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) / COUNT(*), 1), '%') AS preservation_rate
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2
-  GROUP BY spc.page_dag_level
-  ORDER BY spc.page_dag_level;
+    'Orphaned Parent Check' AS validation_type,
+    FORMAT(COUNT(*), 0) AS orphaned_records,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status
+  FROM sass_page_clean c
+  WHERE c.page_parent_id > 0
+    AND NOT EXISTS (
+      SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
+    );
   
-  -- Sample identity groups showing hierarchy-preserved representative mapping
+  -- Validation: Check parent-child level relationships
   SELECT 
-    'Sample Hierarchy-Preserved Identity Groups' AS sample_type,
-    sip.page_title,
-    COUNT(*) AS pages_with_same_title,
-    sip.representative_page_id,
-    rep.page_dag_level AS rep_level,
-    CASE WHEN rep.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS rep_type,
-    CASE WHEN rep.page_dag_level <= 2 THEN 'PRESERVED' ELSE 'STANDARD' END AS selection_type
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean rep ON sip.representative_page_id = rep.page_id
-  GROUP BY sip.page_title, sip.representative_page_id, rep.page_dag_level, rep.page_is_leaf
-  HAVING COUNT(*) > 1
-  ORDER BY rep.page_dag_level ASC, COUNT(*) DESC
-  LIMIT 15;
-  
-  -- Representative selection statistics with hierarchy metrics
-  SELECT 
-    'Representative Selection Stats with Hierarchy Preservation' AS metric_type,
-    COUNT(DISTINCT page_title) AS unique_titles,
-    COUNT(DISTINCT representative_page_id) AS unique_representatives,
-    COUNT(DISTINCT CASE WHEN spc.page_dag_level <= 2 THEN representative_page_id END) AS hierarchy_representatives,
-    ROUND(AVG(pages_per_title), 1) AS avg_pages_per_title,
-    MAX(pages_per_title) AS max_pages_per_title
-  FROM (
-    SELECT 
-      sip.page_title,
-      sip.representative_page_id,
-      COUNT(*) AS pages_per_title
-    FROM sass_identity_pages sip
-    JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-    GROUP BY sip.page_title, sip.representative_page_id
-  ) title_stats
-  JOIN sass_page_clean spc ON title_stats.representative_page_id = spc.page_id;
-  
+    'Level Relationship Check' AS validation_type,
+    FORMAT(COUNT(*), 0) AS level_violations,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status
+  FROM sass_page_clean c
+  JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_parent_id > 0
+    AND p.page_dag_level != c.page_dag_level - 1;
+
 END//
 
 DELIMITER ;
 
 -- ========================================
--- SIMPLE CONVERSION PROCEDURE WITH HIERARCHY PRESERVATION
+-- SIMPLE CONVERSION PROCEDURE
 -- ========================================
 
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentitySimple;
-
 DELIMITER //
+
+DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentitySimple//
 
 CREATE PROCEDURE ConvertSASSPageCleanWithIdentitySimple()
 BEGIN
@@ -372,13 +509,13 @@ BEGIN
   
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Clear target tables (disable foreign key checks for truncation)
+  -- Clear target tables
   SET FOREIGN_KEY_CHECKS = 0;
   TRUNCATE TABLE sass_page_clean;
   TRUNCATE TABLE sass_identity_pages;
   SET FOREIGN_KEY_CHECKS = 1;
   
-  -- Create temporary table with representative mapping to avoid foreign key issues
+  -- Create temporary table with representative mapping
   CREATE TEMPORARY TABLE temp_page_mapping AS
   SELECT 
     sp.page_id,
@@ -390,7 +527,7 @@ BEGIN
     FIRST_VALUE(sp.page_id) OVER (
       PARTITION BY clean_page_title_enhanced(sp.page_title)
       ORDER BY 
-        CASE WHEN sp.page_dag_level <= 2 THEN 0 ELSE 1 END ASC,  -- Prioritize original hierarchy pages (levels 0-2)
+        CASE WHEN sp.page_dag_level <= 2 THEN 0 ELSE 1 END ASC,
         sp.page_dag_level DESC, 
         sp.page_is_leaf ASC, 
         sp.page_id ASC
@@ -398,7 +535,7 @@ BEGIN
     ) as representative_page_id
   FROM sass_page sp;
   
-  -- Insert representative pages into sass_page_clean FIRST
+  -- Insert representative pages into sass_page_clean
   INSERT INTO sass_page_clean (
     page_id,
     page_title,
@@ -419,7 +556,7 @@ BEGIN
   
   SET v_total_processed = ROW_COUNT();
   
-  -- Now insert into sass_identity_pages with foreign key constraint satisfied
+  -- Insert into sass_identity_pages
   INSERT INTO sass_identity_pages (
     page_id,
     page_title,
@@ -441,7 +578,6 @@ BEGIN
   
   SET v_identity_pages = ROW_COUNT();
   
-  -- Clean up temporary table
   DROP TEMPORARY TABLE temp_page_mapping;
   
   -- Count preserved hierarchy representatives
@@ -450,25 +586,88 @@ BEGIN
   JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
   WHERE spc.page_dag_level <= 2;
   
-  -- Summary report with hierarchy preservation metrics
+  -- Remap parent IDs
+  CALL remap_parent_ids();
+  
+  -- Summary report
   SELECT 
-    'Simple Identity Conversion with Hierarchy Preservation Complete' AS status,
+    'Simple Conversion with Parent Remapping Complete' AS status,
     FORMAT(v_total_processed, 0) AS pages_converted,
     FORMAT(v_identity_pages, 0) AS identity_pages_created,
     FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
     FORMAT(v_preserved_hierarchy_pages, 0) AS hierarchy_representatives_preserved,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
-  -- Hierarchy preservation validation
+  -- Validation checks
   SELECT 
-    'Hierarchy Preservation Validation' AS validation_type,
-    'Levels 0-2 Representative Preservation' AS metric,
-    COUNT(CASE WHEN spc.page_dag_level <= 2 AND sip.page_id = sip.representative_page_id THEN 1 END) AS preserved_count,
-    COUNT(CASE WHEN spc.page_dag_level <= 2 THEN 1 END) AS total_hierarchy_pages,
-    CONCAT(ROUND(100.0 * COUNT(CASE WHEN spc.page_dag_level <= 2 AND sip.page_id = sip.representative_page_id THEN 1 END) / 
-                 COUNT(CASE WHEN spc.page_dag_level <= 2 THEN 1 END), 1), '%') AS preservation_rate
+    'Orphaned Parent Check' AS validation_type,
+    FORMAT(COUNT(*), 0) AS orphaned_records,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status
+  FROM sass_page_clean c
+  WHERE c.page_parent_id > 0
+    AND NOT EXISTS (
+      SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
+    );
+
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- ENHANCED VALIDATION PROCEDURES
+-- ========================================
+
+DELIMITER //
+
+DROP PROCEDURE IF EXISTS ValidateHierarchyPreservation//
+
+CREATE PROCEDURE ValidateHierarchyPreservation()
+BEGIN
+  -- Check levels 0-2 preservation
+  SELECT 
+    'Levels 0-2 Preservation Check' AS check_type,
+    COUNT(*) AS total_hierarchy_pages,
+    COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS preserved_as_representatives,
+    CONCAT(ROUND(100.0 * COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) / COUNT(*), 1), '%') AS preservation_rate,
+    CASE 
+      WHEN COUNT(*) = COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) 
+      THEN 'PASS - All hierarchy pages preserved'
+      ELSE 'FAIL - Some hierarchy pages demoted'
+    END AS validation_status
   FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id;
+  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
+  WHERE spc.page_dag_level <= 2;
+  
+  -- Check orphaned parents
+  SELECT 
+    'Orphaned Parent References' AS check_type,
+    FORMAT(COUNT(*), 0) AS orphaned_count,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status
+  FROM sass_page_clean c
+  WHERE c.page_parent_id > 0
+    AND NOT EXISTS (
+      SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
+    );
+  
+  -- Check level relationships
+  SELECT 
+    'Parent-Child Level Relationships' AS check_type,
+    FORMAT(COUNT(*), 0) AS violations,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status
+  FROM sass_page_clean c
+  JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_parent_id > 0
+    AND p.page_dag_level != c.page_dag_level - 1;
+  
+  -- Level distribution
+  SELECT 
+    'Level Distribution' AS report_type,
+    page_dag_level,
+    FORMAT(COUNT(*), 0) AS page_count,
+    FORMAT(COUNT(DISTINCT page_parent_id), 0) AS unique_parents
+  FROM sass_page_clean
+  GROUP BY page_dag_level
+  ORDER BY page_dag_level;
 
 END//
 
@@ -478,10 +677,9 @@ DELIMITER ;
 -- UTILITY PROCEDURES
 -- ========================================
 
--- Procedure to test enhanced title cleaning function
-DROP PROCEDURE IF EXISTS TestEnhancedTitleCleaning;
-
 DELIMITER //
+
+DROP PROCEDURE IF EXISTS TestEnhancedTitleCleaning//
 
 CREATE PROCEDURE TestEnhancedTitleCleaning(
   IN p_test_title VARCHAR(255)
@@ -497,10 +695,9 @@ END//
 
 DELIMITER ;
 
--- Procedure to analyze identity page mapping with hierarchy preservation
-DROP PROCEDURE IF EXISTS AnalyzeIdentityMapping;
-
 DELIMITER //
+
+DROP PROCEDURE IF EXISTS AnalyzeIdentityMapping//
 
 CREATE PROCEDURE AnalyzeIdentityMapping()
 BEGIN
@@ -525,169 +722,75 @@ BEGIN
     COUNT(*) AS total_pages,
     COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS representatives,
     COUNT(CASE WHEN sip.page_id != sip.representative_page_id THEN 1 END) AS non_representatives,
-    CONCAT(ROUND(100.0 * COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) / COUNT(*), 1), '%') AS representation_rate
+    CONCAT(ROUND(100.0 * COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) / COUNT(*), 1), '%') AS preservation_rate
   FROM sass_identity_pages sip
   JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 5
+  WHERE spc.page_dag_level <= 2
   GROUP BY spc.page_dag_level
   ORDER BY spc.page_dag_level;
   
-  -- Largest identity groups with hierarchy status
+  -- Sample identity groups
   SELECT 
-    'Largest Identity Groups with Hierarchy Status' AS analysis_type,
-    page_title,
-    COUNT(*) AS pages_in_group,
-    representative_page_id,
-    MAX(spc.page_dag_level) AS max_level,
-    MIN(spc.page_dag_level) AS min_level,
-    CASE WHEN MIN(spc.page_dag_level) <= 2 THEN 'HIERARCHY PRESERVED' ELSE 'STANDARD SELECTION' END AS selection_method
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  GROUP BY page_title, representative_page_id
-  ORDER BY COUNT(*) DESC
-  LIMIT 20;
-  
-  -- Representative selection analysis with hierarchy metrics
-  SELECT 
-    'Representative Selection Analysis with Hierarchy' AS analysis_type,
-    'Total representatives' AS selection_type,
-    COUNT(DISTINCT representative_page_id) AS count
-  FROM sass_identity_pages
-  
-  UNION ALL
-  
-  SELECT 
-    'Representative Selection Analysis with Hierarchy',
-    'Hierarchy representatives (levels 0-2)',
-    COUNT(DISTINCT sip.representative_page_id)
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2
-  
-  UNION ALL
-  
-  SELECT 
-    'Representative Selection Analysis with Hierarchy',
-    'Standard representatives (levels 3+)',
-    COUNT(DISTINCT sip.representative_page_id)
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_dag_level > 2;
-
-END//
-
-DELIMITER ;
-
--- Procedure to validate hierarchy preservation
-DROP PROCEDURE IF EXISTS ValidateHierarchyPreservation;
-
-DELIMITER //
-
-CREATE PROCEDURE ValidateHierarchyPreservation()
-BEGIN
-  -- Check if any original hierarchy pages lost representative status
-  SELECT 
-    'Hierarchy Preservation Validation' AS validation_type,
-    COUNT(*) AS total_hierarchy_pages,
-    COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS preserved_as_representatives,
-    COUNT(CASE WHEN sip.page_id != sip.representative_page_id THEN 1 END) AS demoted_from_representative,
-    CASE 
-      WHEN COUNT(CASE WHEN sip.page_id != sip.representative_page_id THEN 1 END) = 0 THEN 'PASS - All hierarchy pages preserved'
-      ELSE 'FAIL - Some hierarchy pages demoted'
-    END AS validation_status
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2;
-  
-  -- Show any demoted hierarchy pages (should be empty)
-  SELECT 
-    'Demoted Hierarchy Pages (Should be Empty)' AS issue_type,
-    sip.page_id,
+    'Sample Identity Groups' AS sample_type,
     sip.page_title,
-    spc.page_dag_level,
-    sip.representative_page_id AS demoted_to_representative
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2
-    AND sip.page_id != sip.representative_page_id
-  LIMIT 10;
-  
-  -- Verify Technology page preservation (example)
-  SELECT 
-    'Technology Page Preservation Check' AS check_type,
-    sip.page_id,
-    sip.page_title,
-    spc.page_dag_level,
+    COUNT(*) AS pages_with_same_title,
     sip.representative_page_id,
-    CASE 
-      WHEN sip.page_id = sip.representative_page_id THEN 'PRESERVED as representative'
-      ELSE 'DEMOTED - pointing to different representative'
-    END AS preservation_status
+    rep.page_dag_level AS rep_level,
+    CASE WHEN rep.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS rep_type
   FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE LOWER(sip.page_title) LIKE '%technology%'
-    AND spc.page_dag_level <= 2
-  LIMIT 5;
+  JOIN sass_page_clean rep ON sip.representative_page_id = rep.page_id
+  GROUP BY sip.page_title, sip.representative_page_id, rep.page_dag_level, rep.page_is_leaf
+  HAVING COUNT(*) > 1
+  ORDER BY rep.page_dag_level ASC, COUNT(*) DESC
+  LIMIT 15;
 
 END//
 
 DELIMITER ;
 
 -- ========================================
--- USAGE EXAMPLES AND DOCUMENTATION
+-- USAGE EXAMPLES
 -- ========================================
 
 /*
--- ENHANCED TITLE CLEANING WITH HIERARCHY PRESERVATION
+-- CONVERSION WITH PARENT REMAPPING
 
--- Standard conversion with hierarchy preservation:
+-- Standard batched conversion:
 CALL ConvertSASSPageCleanWithIdentity(100000);
 
--- Simple conversion with hierarchy preservation:
+-- Simple one-pass conversion:
 CALL ConvertSASSPageCleanWithIdentitySimple();
 
--- Test enhanced title cleaning:
-CALL TestEnhancedTitleCleaning('Technology');
-CALL TestEnhancedTitleCleaning('Machine Learning (AI)');
-
--- Analyze identity mapping with hierarchy metrics:
-CALL AnalyzeIdentityMapping();
-
--- Validate hierarchy preservation:
+-- Validate results:
 CALL ValidateHierarchyPreservation();
+
+-- Analyze identity mapping:
+CALL AnalyzeIdentityMapping();
 
 -- Check conversion status:
 SELECT * FROM clean_build_state ORDER BY updated_at DESC;
 
--- Verify specific hierarchy pages preserved:
+-- Test specific page hierarchy after conversion:
 SELECT 
-  sip.page_id,
-  sip.page_title,
-  spc.page_dag_level,
-  sip.representative_page_id,
-  CASE WHEN sip.page_id = sip.representative_page_id THEN 'PRESERVED' ELSE 'DEMOTED' END AS status
-FROM sass_identity_pages sip
-JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-WHERE spc.page_dag_level <= 2
-ORDER BY spc.page_dag_level, sip.page_title;
+  c.page_id,
+  c.page_title,
+  c.page_dag_level,
+  c.page_parent_id,
+  p.page_title AS parent_title,
+  p.page_dag_level AS parent_level
+FROM sass_page_clean c
+LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+WHERE LOWER(c.page_title) = 'naturalists';
 
-KEY HIERARCHY PRESERVATION FEATURES:
-1. Modified representative selection to prioritize pages with page_dag_level <= 2
-2. Original Wiki_top3_levels page IDs (levels 0-2) maintain representative status
-3. Standard representative selection applies only to levels 3+
-4. Comprehensive validation procedures to verify preservation
-5. Technology page ID 696648 will be preserved instead of replaced by 29816
+KEY FEATURES:
+1. Preserves levels 0-2 pages as representatives
+2. Remaps all parent_ids to point to valid representatives
+3. Enforces parent.level = child.level - 1 constraint
+4. Handles orphaned pages by finding valid parents
+5. Comprehensive validation of hierarchy integrity
 
-REPRESENTATIVE SELECTION CRITERIA (UPDATED):
-1. FIRST: Original hierarchy pages (page_dag_level <= 2)
-2. THEN: Highest page_dag_level (deepest in hierarchy)
-3. THEN: Prefer page_is_leaf = 0 (categories over articles)
-4. FINALLY: Use lowest page_id for tie-breaking
-
-PERFORMANCE ESTIMATE:
-- 9M records: ~15-20 minutes total runtime
-- Hierarchy preservation adds minimal overhead (~2-3% increase)
-- Enhanced normalization: +25% processing time
-- Identity mapping with hierarchy-aware window functions: +40% for representative calculation
-- Memory usage: ~2GB peak during window function operations
+VALIDATION CHECKS:
+- Zero orphaned parent references
+- All parent-child relationships maintain level constraints
+- Levels 0-2 preserved as representatives
 */
