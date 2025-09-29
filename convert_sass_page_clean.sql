@@ -126,7 +126,7 @@ INSERT IGNORE INTO sass_filter_patterns (pattern_text, pattern_type, confidence_
 INSERT IGNORE INTO sass_roots (root_id, root_name, page_id)
 SELECT DISTINCT
   w3l.parent_page_id as root_id,
-  w3l.parent_title as root_name,
+  CONVERT(w3l.parent_title, CHAR) as root_name,
   w3l.parent_page_id as page_id
 FROM wiki_top3_levels w3l
 WHERE w3l.parent_page_id IS NOT NULL
@@ -303,7 +303,7 @@ BEGIN
     INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT DISTINCT
       w3l.parent_page_id as page_id,
-      w3l.parent_title as page_title,
+      CONVERT(w3l.parent_title, CHAR) as page_title,
       0 as page_parent_id,  -- Roots have no parent
       w3l.parent_page_id as page_root_id,  -- Root of their own domain
       0 as page_dag_level,
@@ -312,7 +312,7 @@ BEGIN
     JOIN page p ON w3l.parent_page_id = p.page_id
     WHERE w3l.parent_page_id IS NOT NULL
       AND w3l.parent_title IS NOT NULL
-      AND p.page_content_model = 'wikitext';
+      AND CONVERT(p.page_content_model, CHAR) = 'wikitext';
     
     SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
     
@@ -320,7 +320,7 @@ BEGIN
     INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT DISTINCT
       w3l.child_page_id as page_id,
-      w3l.child_title as page_title,
+      CONVERT(w3l.child_title, CHAR) as page_title,
       w3l.parent_page_id as page_parent_id,
       w3l.parent_page_id as page_root_id,
       1 as page_dag_level,
@@ -329,10 +329,10 @@ BEGIN
     JOIN page p ON w3l.child_page_id = p.page_id
     WHERE w3l.child_page_id IS NOT NULL
       AND w3l.child_title IS NOT NULL
-      AND p.page_content_model = 'wikitext'
+      AND CONVERT(p.page_content_model, CHAR) = 'wikitext'
       AND (
         p_enable_filtering = 0 
-        OR should_filter_category(w3l.child_title, p.page_len, p.page_namespace) = 0
+        OR should_filter_category(CONVERT(w3l.child_title, CHAR), p.page_len, p.page_namespace) = 0
       );
     
     SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
@@ -341,7 +341,7 @@ BEGIN
     INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT DISTINCT
       w3l.grandchild_page_id as page_id,
-      w3l.grandchild_title as page_title,
+      CONVERT(w3l.grandchild_title, CHAR) as page_title,
       w3l.child_page_id as page_parent_id,
       w3l.parent_page_id as page_root_id,
       2 as page_dag_level,
@@ -350,10 +350,10 @@ BEGIN
     JOIN page p ON w3l.grandchild_page_id = p.page_id
     WHERE w3l.grandchild_page_id IS NOT NULL
       AND w3l.grandchild_title IS NOT NULL
-      AND p.page_content_model = 'wikitext'
+      AND CONVERT(p.page_content_model, CHAR) = 'wikitext'
       AND (
         p_enable_filtering = 0 
-        OR should_filter_category(w3l.grandchild_title, p.page_len, p.page_namespace) = 0
+        OR should_filter_category(CONVERT(w3l.grandchild_title, CHAR), p.page_len, p.page_namespace) = 0
       );
     
     SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
