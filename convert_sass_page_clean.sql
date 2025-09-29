@@ -359,7 +359,7 @@ BEGIN
     SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
     
     -- Initialize sass_work with level 2 data
-    INSERT INTO sass_work (page_id, parent_id, root_id, level)
+    INSERT IGNORE INTO sass_work (page_id, parent_id, root_id, level)
     SELECT page_id, page_parent_id, page_root_id, 2 as level
     FROM sass_page
     WHERE page_dag_level = 2;
