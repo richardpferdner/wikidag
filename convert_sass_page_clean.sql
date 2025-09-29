@@ -364,7 +364,17 @@ BEGIN
     FROM sass_page
     WHERE page_dag_level = 2;
     
+    -- Progress report for pre-computed levels
+    SELECT 
+      'Levels 0-2: Pre-computed from wiki_top3_levels' AS status,
+      FORMAT(v_levels_012_count, 0) AS pages_from_precomputed,
+      FORMAT((SELECT COUNT(*) FROM sass_page WHERE page_dag_level = 0), 0) AS level_0_roots,
+      FORMAT((SELECT COUNT(*) FROM sass_page WHERE page_dag_level = 1), 0) AS level_1_children,
+      FORMAT((SELECT COUNT(*) FROM sass_page WHERE page_dag_level = 2), 0) AS level_2_grandchildren,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
+    
     SET v_current_level = 3;
+    SET v_total_new_pages = v_levels_012_count;
   END IF;
   
   -- Continue with standard recursive build for levels 3+
