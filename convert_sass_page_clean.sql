@@ -38,14 +38,14 @@ CREATE TABLE IF NOT EXISTS sass_page (
   INDEX idx_leaf (page_is_leaf)
 ) ENGINE=InnoDB;
 
--- Temporary working table for current build iteration
+-- Temporary working table for current build iteration (no unique constraints for multi-path handling)
 CREATE TABLE IF NOT EXISTS sass_work (
   page_id INT UNSIGNED NOT NULL,
   parent_id INT UNSIGNED NOT NULL,
   root_id INT NOT NULL,
   level INT NOT NULL,
   
-  PRIMARY KEY (page_id, parent_id, level),  -- Allow same page-parent at different levels
+  INDEX idx_page_parent (page_id, parent_id),
   INDEX idx_level (level),
   INDEX idx_root (root_id),
   INDEX idx_parent (parent_id)
