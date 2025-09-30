@@ -1,18 +1,14 @@
--- SASS Wikipedia Page Title Cleaner with Identity Pages - UPDATED WITH ORPHAN AUTO-REPAIR
+-- SASS Wikipedia Page Title Cleaner - Refactored
 -- Converts sass_page to sass_page_clean with standardized titles
--- Creates sass_identity_pages with representative page mapping
--- PRESERVES original Wiki_top3_levels page IDs for levels 0-2
--- Applies enhanced text normalization for improved matching and search
--- AUTO-REPAIRS orphan references caused by representative deduplication
--- FIXED: MySQL Error 1093 - uses temporary table approach
--- FIXED: Self-reference circular loops - uses grandparent fallback
--- DEFAULT: Processes levels 0-10 (stops at level 10)
+-- Deduplicates to one representative per unique title
+-- Filters weak branches (categories with <9 children)
+-- Repairs orphan references and removes self-references
+-- Processes levels 0-7 only
 
 -- ========================================
 -- TABLE DEFINITIONS
 -- ========================================
 
--- Clean SASS page table with identical structure to sass_page
 CREATE TABLE IF NOT EXISTS sass_page_clean (
   page_id INT UNSIGNED NOT NULL,
   page_title VARCHAR(255) NOT NULL,
@@ -29,27 +25,6 @@ CREATE TABLE IF NOT EXISTS sass_page_clean (
   INDEX idx_leaf (page_is_leaf)
 ) ENGINE=InnoDB;
 
--- Identity pages table with representative page mapping
-CREATE TABLE IF NOT EXISTS sass_identity_pages (
-  page_id INT UNSIGNED NOT NULL,
-  page_title VARCHAR(255) NOT NULL,
-  page_parent_id INT NOT NULL,
-  page_root_id INT NOT NULL,
-  page_dag_level INT NOT NULL,
-  page_is_leaf TINYINT(1) NOT NULL DEFAULT 0,
-  representative_page_id INT UNSIGNED NOT NULL,
-  
-  PRIMARY KEY (page_id),
-  INDEX idx_title (page_title),
-  INDEX idx_parent (page_parent_id),
-  INDEX idx_root (page_root_id),
-  INDEX idx_level (page_dag_level),
-  INDEX idx_leaf (page_is_leaf),
-  INDEX idx_representative (representative_page_id),
-  FOREIGN KEY (representative_page_id) REFERENCES sass_page_clean(page_id)
-) ENGINE=InnoDB;
-
--- Build progress tracking
 CREATE TABLE IF NOT EXISTS clean_build_state (
   state_key VARCHAR(255) PRIMARY KEY,
   state_value INT NOT NULL,
@@ -63,7 +38,6 @@ CREATE TABLE IF NOT EXISTS clean_build_state (
 
 DELIMITER //
 
--- Function to clean page titles with enhanced normalization
 CREATE FUNCTION IF NOT EXISTS clean_page_title_enhanced(
   input_title VARCHAR(255)
 ) RETURNS VARCHAR(255)
@@ -86,7 +60,7 @@ BEGIN
   -- Step 4: Replace spaces back to underscores
   SET cleaned_title = REPLACE(cleaned_title, ' ', '_');
   
-  -- Step 5: Convert currency to text (preserve existing functionality)
+  -- Step 5: Convert currency to text
   SET cleaned_title = REPLACE(cleaned_title, '€', 'Euro');
   SET cleaned_title = REPLACE(cleaned_title, '£', 'Pound');
   SET cleaned_title = REPLACE(cleaned_title, '¥', 'Yen');
@@ -115,466 +89,58 @@ END//
 DELIMITER ;
 
 -- ========================================
--- MAIN CONVERSION PROCEDURE WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
+-- MAIN CONVERSION PROCEDURE
 -- ========================================
 
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentity;
+DROP PROCEDURE IF EXISTS ConvertSASSPageClean;
 
 DELIMITER //
 
-CREATE PROCEDURE ConvertSASSPageCleanWithIdentity(
-  IN p_batch_size INT
-)
+CREATE PROCEDURE ConvertSASSPageClean()
 BEGIN
   DECLARE v_start_time DECIMAL(14,3);
-  DECLARE v_total_pages INT DEFAULT 0;
-  DECLARE v_processed_pages INT DEFAULT 0;
-  DECLARE v_batch_count INT DEFAULT 0;
-  DECLARE v_last_page_id INT DEFAULT 0;
-  DECLARE v_continue TINYINT(1) DEFAULT 1;
-  DECLARE v_identity_pages INT DEFAULT 0;
-  DECLARE v_preserved_hierarchy_pages INT DEFAULT 0;
+  DECLARE v_total_processed INT DEFAULT 0;
   DECLARE v_orphans_repaired INT DEFAULT 0;
   DECLARE v_self_ref_repaired INT DEFAULT 0;
   DECLARE v_self_ref_unresolved INT DEFAULT 0;
   
-  -- Set defaults
-  IF p_batch_size IS NULL THEN SET p_batch_size = 100000; END IF;
-  
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Get total count
-  SELECT COUNT(*) INTO v_total_pages FROM sass_page;
-  
-  -- Clear target tables (disable foreign key checks for truncation)
-  SET FOREIGN_KEY_CHECKS = 0;
+  -- Clear target table
   TRUNCATE TABLE sass_page_clean;
-  TRUNCATE TABLE sass_identity_pages;
-  SET FOREIGN_KEY_CHECKS = 1;
-  
-  -- Initialize build state
-  INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 0, 'Starting page title cleaning with hierarchy preservation')
-  ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting page title cleaning with hierarchy preservation';
-  
-  -- Progress report
-  SELECT 
-    'Starting Dual Table Conversion with Hierarchy Preservation' AS status,
-    FORMAT(v_total_pages, 0) AS total_pages_to_process,
-    p_batch_size AS batch_size;
   
   -- ========================================
-  -- PHASE 1: BUILD sass_page_clean
-  -- ========================================
-  
-  WHILE v_continue = 1 DO
-    SET v_batch_count = v_batch_count + 1;
-    
-    -- Process batch with enhanced title cleaning
-    INSERT INTO sass_page_clean (
-      page_id,
-      page_title,
-      page_parent_id,
-      page_root_id,
-      page_dag_level,
-      page_is_leaf
-    )
-    SELECT 
-      sp.page_id,
-      clean_page_title_enhanced(sp.page_title) as page_title,
-      sp.page_parent_id,
-      sp.page_root_id,
-      sp.page_dag_level,
-      sp.page_is_leaf
-    FROM sass_page sp
-    WHERE sp.page_id > v_last_page_id
-    ORDER BY sp.page_id
-    LIMIT p_batch_size;
-    
-    SET v_processed_pages = v_processed_pages + ROW_COUNT();
-    
-    -- Update last processed ID for next batch
-    SELECT MAX(page_id) INTO v_last_page_id FROM sass_page_clean;
-    
-    -- Progress report
-    SELECT 
-      CONCAT('sass_page_clean Batch ', v_batch_count) AS status,
-      FORMAT(ROW_COUNT(), 0) AS pages_in_batch,
-      FORMAT(v_processed_pages, 0) AS total_processed,
-      CONCAT(ROUND(100.0 * v_processed_pages / v_total_pages, 1), '%') AS progress,
-      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
-    
-    -- Check if done
-    IF ROW_COUNT() < p_batch_size OR v_processed_pages >= v_total_pages THEN
-      SET v_continue = 0;
-    END IF;
-    
-  END WHILE;
-  
-  -- ========================================
-  -- PHASE 2: BUILD sass_identity_pages WITH HIERARCHY PRESERVATION
+  -- PHASE 1: BUILD sass_page_clean WITH DEDUPLICATION
   -- ========================================
   
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 2, 'Building identity pages with hierarchy-preserving representative mapping')
-  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Building identity pages with hierarchy-preserving representative mapping';
+  VALUES ('build_phase', 1, 'Building sass_page_clean with deduplication')
+  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Building sass_page_clean with deduplication';
   
-  -- Create temporary table for representative page calculation with hierarchy preservation
+  -- Create temporary table for representative selection
   CREATE TEMPORARY TABLE temp_representatives AS
   SELECT 
     page_title,
     page_id as representative_page_id
   FROM (
     SELECT 
-      page_title,
+      clean_page_title_enhanced(page_title) as page_title,
       page_id,
       page_dag_level,
       page_is_leaf,
       ROW_NUMBER() OVER (
-        PARTITION BY page_title 
+        PARTITION BY clean_page_title_enhanced(page_title)
         ORDER BY 
-          CASE WHEN page_dag_level <= 2 THEN 0 ELSE 1 END ASC,  -- Prioritize original hierarchy pages (levels 0-2)
-          page_dag_level DESC, 
-          page_is_leaf ASC, 
-          page_id ASC
+          CASE WHEN page_dag_level <= 2 THEN 0 ELSE 1 END ASC,  -- Prioritize levels 0-2
+          page_dag_level DESC,                                   -- Then deepest
+          page_is_leaf ASC,                                      -- Then categories
+          page_id ASC                                            -- Then oldest
       ) as rn
-    FROM sass_page_clean
+    FROM sass_page
   ) ranked
   WHERE rn = 1;
   
-  -- Count preserved hierarchy pages
-  SELECT COUNT(*) INTO v_preserved_hierarchy_pages
-  FROM temp_representatives tr
-  JOIN sass_page_clean spc ON tr.representative_page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2;
-  
-  -- Build sass_identity_pages with hierarchy-preserving representative mapping
-  INSERT INTO sass_identity_pages (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf,
-    representative_page_id
-  )
-  SELECT 
-    spc.page_id,
-    spc.page_title,
-    spc.page_parent_id,
-    spc.page_root_id,
-    spc.page_dag_level,
-    spc.page_is_leaf,
-    tr.representative_page_id
-  FROM sass_page_clean spc
-  JOIN temp_representatives tr ON spc.page_title = tr.page_title;
-  
-  SET v_identity_pages = ROW_COUNT();
-  
-  -- Clean up temporary table
-  DROP TEMPORARY TABLE temp_representatives;
-  
-  -- ========================================
-  -- PHASE 3: AUTO-REPAIR ORPHAN PARENT REFERENCES WITH SELF-REFERENCE PROTECTION
-  -- ========================================
-  
-  INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 3, 'Auto-repairing orphan parent references with self-reference protection')
-  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Auto-repairing orphan parent references with self-reference protection';
-  
-  -- Progress report
-  SELECT 
-    'PHASE 3: Auto-Repairing Orphan References (with self-reference detection)' AS status,
-    'Step 1: Standard orphan repair, Step 2: Self-reference grandparent fallback' AS action;
-  
-  -- Create temporary table for standard orphans (excludes self-references)
-  CREATE TEMPORARY TABLE temp_orphans AS
-  SELECT c.page_id, sip.representative_page_id
-  FROM sass_page_clean c
-  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
-  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
-  WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 10
-    AND p.page_id IS NULL
-    AND c.page_id != sip.representative_page_id;  -- Exclude self-references
-  
-  -- Create temporary table for self-reference orphans with grandparent fallback
-  CREATE TEMPORARY TABLE temp_self_ref_orphans AS
-  SELECT 
-    c.page_id,
-    COALESCE(gp_clean.page_id, sip.representative_page_id) as new_parent_id,
-    CASE 
-      WHEN gp_clean.page_id IS NOT NULL THEN 'grandparent'
-      ELSE 'unresolved'
-    END as resolution_method
-  FROM sass_page_clean c
-  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
-  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
-  LEFT JOIN sass_page sp_orig ON c.page_parent_id = sp_orig.page_id
-  LEFT JOIN sass_page sp_grandparent ON sp_orig.page_parent_id = sp_grandparent.page_id
-  LEFT JOIN sass_page_clean gp_clean ON sp_grandparent.page_id = gp_clean.page_id
-  WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 10
-    AND p.page_id IS NULL
-    AND c.page_id = sip.representative_page_id;  -- Only self-references
-  
-  -- Step 1: Repair standard orphans (non-self-references)
-  UPDATE sass_page_clean c
-  JOIN temp_orphans t ON c.page_id = t.page_id
-  SET c.page_parent_id = t.representative_page_id;
-  
-  SET v_orphans_repaired = ROW_COUNT();
-  
-  -- Step 2: Repair self-reference orphans with grandparent fallback
-  UPDATE sass_page_clean c
-  JOIN temp_self_ref_orphans t ON c.page_id = t.page_id
-  SET c.page_parent_id = t.new_parent_id
-  WHERE t.resolution_method = 'grandparent'
-    AND t.new_parent_id != c.page_id;  -- Double-check no self-reference
-  
-  SET v_self_ref_repaired = ROW_COUNT();
-  
-  -- Count unresolved self-references (grandparent also orphaned)
-  SELECT COUNT(*) INTO v_self_ref_unresolved
-  FROM temp_self_ref_orphans
-  WHERE resolution_method = 'unresolved';
-  
-  -- Clean up temporary tables
-  DROP TEMPORARY TABLE temp_orphans;
-  DROP TEMPORARY TABLE temp_self_ref_orphans;
-  
-  -- Log repair statistics
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('orphans_auto_repaired', v_orphans_repaired)
-  ON DUPLICATE KEY UPDATE state_value = v_orphans_repaired;
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('self_ref_orphans_repaired', v_self_ref_repaired)
-  ON DUPLICATE KEY UPDATE state_value = v_self_ref_repaired;
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('self_ref_orphans_unresolved', v_self_ref_unresolved)
-  ON DUPLICATE KEY UPDATE state_value = v_self_ref_unresolved;
-  
-  -- Verification: Count remaining orphans and self-references
-  SET @remaining_orphans = (
-    SELECT COUNT(*) 
-    FROM sass_page_clean c 
-    LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
-    WHERE c.page_dag_level > 0 
-      AND c.page_dag_level <= 10
-      AND p.page_id IS NULL
-  );
-  
-  SET @self_references = (
-    SELECT COUNT(*)
-    FROM sass_page_clean
-    WHERE page_id = page_parent_id
-      AND page_dag_level > 0
-  );
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('remaining_orphans_after_repair', @remaining_orphans)
-  ON DUPLICATE KEY UPDATE state_value = @remaining_orphans;
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('self_references_created', @self_references)
-  ON DUPLICATE KEY UPDATE state_value = @self_references;
-  
-  -- Orphan repair report
-  SELECT 
-    'Orphan Auto-Repair Complete' AS status,
-    FORMAT(v_orphans_repaired, 0) AS standard_orphans_fixed,
-    FORMAT(v_self_ref_repaired, 0) AS self_ref_fixed_via_grandparent,
-    FORMAT(v_self_ref_unresolved, 0) AS self_ref_unresolved,
-    FORMAT(@remaining_orphans, 0) AS remaining_orphans,
-    FORMAT(@self_references, 0) AS self_references_created,
-    CASE 
-      WHEN @remaining_orphans = v_self_ref_unresolved AND @self_references = 0 
-        THEN 'SUCCESS - Only unresolvable orphans remain (no grandparent)'
-      WHEN @self_references = 0 
-        THEN 'SUCCESS - No self-references created'
-      ELSE CONCAT('WARNING - ', @self_references, ' self-references exist')
-    END AS repair_status;
-  
-  -- Update final build state
-  INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_status', 100, 'Dual table conversion with hierarchy preservation and orphan repair completed successfully')
-  ON DUPLICATE KEY UPDATE state_value = 100, state_text = 'Dual table conversion with hierarchy preservation and orphan repair completed successfully';
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('total_pages_converted', v_processed_pages)
-  ON DUPLICATE KEY UPDATE state_value = v_processed_pages;
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('total_identity_pages', v_identity_pages)
-  ON DUPLICATE KEY UPDATE state_value = v_identity_pages;
-  
-  INSERT INTO clean_build_state (state_key, state_value) 
-  VALUES ('preserved_hierarchy_representatives', v_preserved_hierarchy_pages)
-  ON DUPLICATE KEY UPDATE state_value = v_preserved_hierarchy_pages;
-  
-  -- ========================================
-  -- FINAL SUMMARY REPORT WITH ORPHAN REPAIR METRICS
-  -- ========================================
-  
-  SELECT 
-    'COMPLETE - SASS Identity Page Conversion with Hierarchy Preservation & Orphan Repair' AS final_status,
-    FORMAT(v_total_pages, 0) AS original_pages,
-    FORMAT(v_processed_pages, 0) AS pages_in_clean_table,
-    FORMAT(v_identity_pages, 0) AS identity_pages_created,
-    FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
-    FORMAT(v_preserved_hierarchy_pages, 0) AS hierarchy_representatives_preserved,
-    FORMAT(v_orphans_repaired, 0) AS standard_orphans_repaired,
-    FORMAT(v_self_ref_repaired, 0) AS self_ref_repaired,
-    FORMAT(v_self_ref_unresolved, 0) AS self_ref_unresolved,
-    FORMAT(@remaining_orphans, 0) AS remaining_orphans,
-    FORMAT(@self_references, 0) AS self_references,
-    v_batch_count AS total_batches,
-    ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
-  
-  -- Hierarchy preservation validation
-  SELECT 
-    'Hierarchy Preservation Validation' AS validation_type,
-    spc.page_dag_level,
-    COUNT(*) AS pages_at_level,
-    COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS representatives_at_level,
-    CONCAT(ROUND(100.0 * COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) / COUNT(*), 1), '%') AS preservation_rate
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2
-  GROUP BY spc.page_dag_level
-  ORDER BY spc.page_dag_level;
-  
-  -- Sample identity groups showing hierarchy-preserved representative mapping
-  SELECT 
-    'Sample Hierarchy-Preserved Identity Groups' AS sample_type,
-    sip.page_title,
-    COUNT(*) AS pages_with_same_title,
-    sip.representative_page_id,
-    rep.page_dag_level AS rep_level,
-    CASE WHEN rep.page_is_leaf = 1 THEN 'Article' ELSE 'Category' END AS rep_type,
-    CASE WHEN rep.page_dag_level <= 2 THEN 'PRESERVED' ELSE 'STANDARD' END AS selection_type
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean rep ON sip.representative_page_id = rep.page_id
-  GROUP BY sip.page_title, sip.representative_page_id, rep.page_dag_level, rep.page_is_leaf
-  HAVING COUNT(*) > 1
-  ORDER BY rep.page_dag_level ASC, COUNT(*) DESC
-  LIMIT 15;
-  
-  -- Representative selection statistics with hierarchy metrics
-  SELECT 
-    'Representative Selection Stats with Hierarchy Preservation' AS metric_type,
-    COUNT(DISTINCT page_title) AS unique_titles,
-    COUNT(DISTINCT representative_page_id) AS unique_representatives,
-    COUNT(DISTINCT CASE WHEN spc.page_dag_level <= 2 THEN representative_page_id END) AS hierarchy_representatives,
-    ROUND(AVG(pages_per_title), 1) AS avg_pages_per_title,
-    MAX(pages_per_title) AS max_pages_per_title
-  FROM (
-    SELECT 
-      sip.page_title,
-      sip.representative_page_id,
-      COUNT(*) AS pages_per_title
-    FROM sass_identity_pages sip
-    JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-    GROUP BY sip.page_title, sip.representative_page_id
-  ) title_stats
-  JOIN sass_page_clean spc ON title_stats.representative_page_id = spc.page_id;
-  
-  -- Final integrity check
-  SELECT 
-    'Final Data Integrity Check' AS check_type,
-    'Level 0 with non-zero parent' as violation_type, 
-    COUNT(*) as count 
-  FROM sass_page_clean 
-  WHERE page_dag_level = 0 AND page_parent_id != 0
-  
-  UNION ALL
-  
-  SELECT 
-    'Final Data Integrity Check',
-    'Missing parent (orphans)', 
-    COUNT(*) 
-  FROM sass_page_clean c 
-  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
-  WHERE c.page_dag_level > 0 
-    AND c.page_dag_level <= 10
-    AND p.page_id IS NULL
-  
-  UNION ALL
-  
-  SELECT 
-    'Final Data Integrity Check',
-    'Self-references (page_id = parent_id)', 
-    COUNT(*) 
-  FROM sass_page_clean
-  WHERE page_id = page_parent_id
-    AND page_dag_level > 0
-  
-  UNION ALL
-  
-  SELECT 
-    'Final Data Integrity Check',
-    'Wrong parent level', 
-    COUNT(*) 
-  FROM sass_page_clean c 
-  JOIN sass_page_clean p ON c.page_parent_id = p.page_id 
-  WHERE c.page_dag_level > 0 
-    AND c.page_dag_level <= 10
-    AND p.page_dag_level != c.page_dag_level - 1;
-  
-END//
-
-DELIMITER ;
-
--- ========================================
--- SIMPLE CONVERSION PROCEDURE WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
--- DEFAULT: Processes levels 0-10
--- ========================================
-
-DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentitySimple;
-
-DELIMITER //
-
-CREATE PROCEDURE ConvertSASSPageCleanWithIdentitySimple()
-BEGIN
-  DECLARE v_start_time DECIMAL(14,3);
-  DECLARE v_total_processed INT DEFAULT 0;
-  DECLARE v_identity_pages INT DEFAULT 0;
-  DECLARE v_preserved_hierarchy_pages INT DEFAULT 0;
-  DECLARE v_orphans_repaired INT DEFAULT 0;
-  DECLARE v_self_ref_repaired INT DEFAULT 0;
-  DECLARE v_self_ref_unresolved INT DEFAULT 0;
-  
-  SET v_start_time = UNIX_TIMESTAMP();
-  
-  -- Clear target tables (disable foreign key checks for truncation)
-  SET FOREIGN_KEY_CHECKS = 0;
-  TRUNCATE TABLE sass_page_clean;
-  TRUNCATE TABLE sass_identity_pages;
-  SET FOREIGN_KEY_CHECKS = 1;
-  
-  -- Create temporary table with representative mapping to avoid foreign key issues
-  CREATE TEMPORARY TABLE temp_page_mapping AS
-  SELECT 
-    sp.page_id,
-    clean_page_title_enhanced(sp.page_title) as page_title,
-    sp.page_parent_id,
-    sp.page_root_id,
-    sp.page_dag_level,
-    sp.page_is_leaf,
-    FIRST_VALUE(sp.page_id) OVER (
-      PARTITION BY clean_page_title_enhanced(sp.page_title)
-      ORDER BY 
-        CASE WHEN sp.page_dag_level <= 2 THEN 0 ELSE 1 END ASC,  -- Prioritize original hierarchy pages (levels 0-2)
-        sp.page_dag_level DESC, 
-        sp.page_is_leaf ASC, 
-        sp.page_id ASC
-      ROWS UNBOUNDED PRECEDING
-    ) as representative_page_id
-  FROM sass_page sp;
-  
-  -- Insert representative pages into sass_page_clean FIRST
+  -- Build sass_page_clean with representatives only
   INSERT INTO sass_page_clean (
     page_id,
     page_title,
@@ -583,162 +149,345 @@ BEGIN
     page_dag_level,
     page_is_leaf
   )
-  SELECT DISTINCT
-    representative_page_id as page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf
-  FROM temp_page_mapping tmp1
-  WHERE tmp1.page_id = tmp1.representative_page_id;
+  SELECT 
+    tr.representative_page_id,
+    tr.page_title,
+    sp.page_parent_id,
+    sp.page_root_id,
+    sp.page_dag_level,
+    sp.page_is_leaf
+  FROM temp_representatives tr
+  JOIN sass_page sp ON tr.representative_page_id = sp.page_id;
   
   SET v_total_processed = ROW_COUNT();
   
-  -- Now insert into sass_identity_pages with foreign key constraint satisfied
-  INSERT INTO sass_identity_pages (
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf,
-    representative_page_id
-  )
-  SELECT 
-    page_id,
-    page_title,
-    page_parent_id,
-    page_root_id,
-    page_dag_level,
-    page_is_leaf,
-    representative_page_id
-  FROM temp_page_mapping;
-  
-  SET v_identity_pages = ROW_COUNT();
-  
-  -- Clean up temporary table
-  DROP TEMPORARY TABLE temp_page_mapping;
-  
-  -- Count preserved hierarchy representatives
-  SELECT COUNT(DISTINCT representative_page_id) INTO v_preserved_hierarchy_pages
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2;
-  
-  -- ========================================
-  -- AUTO-REPAIR ORPHAN PARENT REFERENCES WITH SELF-REFERENCE PROTECTION
-  -- DEFAULT: Processes levels 0-10
-  -- ========================================
+  DROP TEMPORARY TABLE temp_representatives;
   
   SELECT 
-    'Auto-Repairing Orphan References (with self-reference detection)' AS status,
-    'Step 1: Standard orphan repair, Step 2: Self-reference grandparent fallback' AS action;
+    'Phase 1 Complete: Deduplication' AS status,
+    FORMAT(v_total_processed, 0) AS representatives_created,
+    ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
   
-  -- Create temporary table for standard orphans (excludes self-references)
-  CREATE TEMPORARY TABLE temp_orphans AS
-  SELECT c.page_id, sip.representative_page_id
+  -- ========================================
+  -- PHASE 2: AUTO-REPAIR ORPHAN REFERENCES
+  -- ========================================
+  
+  INSERT INTO clean_build_state (state_key, state_value, state_text) 
+  VALUES ('build_phase', 2, 'Auto-repairing orphan references')
+  ON DUPLICATE KEY UPDATE state_value = 2, state_text = 'Auto-repairing orphan references';
+  
+  -- Find representative for each orphaned parent
+  CREATE TEMPORARY TABLE temp_orphan_mappings AS
+  SELECT DISTINCT
+    c.page_id,
+    rep.page_id as new_parent_id
   FROM sass_page_clean c
-  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  JOIN sass_page sp_parent ON c.page_parent_id = sp_parent.page_id
+  JOIN sass_page_clean rep ON clean_page_title_enhanced(sp_parent.page_title) = rep.page_title
   WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 10
+    AND c.page_dag_level <= 7
     AND p.page_id IS NULL
-    AND c.page_id != sip.representative_page_id;  -- Exclude self-references
+    AND c.page_id != rep.page_id;  -- Prevent self-references
   
-  -- Create temporary table for self-reference orphans with grandparent fallback
+  -- Update orphans to point to representative parents
+  UPDATE sass_page_clean c
+  JOIN temp_orphan_mappings t ON c.page_id = t.page_id
+  SET c.page_parent_id = t.new_parent_id;
+  
+  SET v_orphans_repaired = ROW_COUNT();
+  
+  DROP TEMPORARY TABLE temp_orphan_mappings;
+  
+  -- Handle self-reference orphans with grandparent fallback
   CREATE TEMPORARY TABLE temp_self_ref_orphans AS
   SELECT 
     c.page_id,
-    COALESCE(gp_clean.page_id, sip.representative_page_id) as new_parent_id,
-    CASE 
-      WHEN gp_clean.page_id IS NOT NULL THEN 'grandparent'
-      ELSE 'unresolved'
-    END as resolution_method
+    COALESCE(gp_clean.page_id, c.page_parent_id) as new_parent_id
   FROM sass_page_clean c
-  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   LEFT JOIN sass_page sp_orig ON c.page_parent_id = sp_orig.page_id
   LEFT JOIN sass_page sp_grandparent ON sp_orig.page_parent_id = sp_grandparent.page_id
   LEFT JOIN sass_page_clean gp_clean ON sp_grandparent.page_id = gp_clean.page_id
   WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 10
-    AND p.page_id IS NULL
-    AND c.page_id = sip.representative_page_id;  -- Only self-references
+    AND c.page_dag_level <= 7
+    AND p.page_id IS NULL;
   
-  -- Step 1: Repair standard orphans (non-self-references)
-  UPDATE sass_page_clean c
-  JOIN temp_orphans t ON c.page_id = t.page_id
-  SET c.page_parent_id = t.representative_page_id;
-  
-  SET v_orphans_repaired = ROW_COUNT();
-  
-  -- Step 2: Repair self-reference orphans with grandparent fallback
   UPDATE sass_page_clean c
   JOIN temp_self_ref_orphans t ON c.page_id = t.page_id
   SET c.page_parent_id = t.new_parent_id
-  WHERE t.resolution_method = 'grandparent'
-    AND t.new_parent_id != c.page_id;  -- Double-check no self-reference
+  WHERE t.new_parent_id != c.page_id;
   
   SET v_self_ref_repaired = ROW_COUNT();
   
-  -- Count unresolved self-references
+  -- Count unresolved
   SELECT COUNT(*) INTO v_self_ref_unresolved
-  FROM temp_self_ref_orphans
-  WHERE resolution_method = 'unresolved';
+  FROM sass_page_clean c
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_dag_level > 0 AND c.page_dag_level <= 7 AND p.page_id IS NULL;
   
-  -- Clean up temporary tables
-  DROP TEMPORARY TABLE temp_orphans;
   DROP TEMPORARY TABLE temp_self_ref_orphans;
   
-  -- Verification: Count remaining orphans and self-references
-  SET @remaining_orphans = (
-    SELECT COUNT(*) 
-    FROM sass_page_clean c 
-    LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
-    WHERE c.page_dag_level > 0 
-      AND c.page_dag_level <= 10
-      AND p.page_id IS NULL
-  );
+  -- Remove any self-references
+  UPDATE sass_page_clean c
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  SET c.page_parent_id = 0
+  WHERE c.page_id = c.page_parent_id AND c.page_dag_level > 0;
   
-  SET @self_references = (
-    SELECT COUNT(*)
-    FROM sass_page_clean
-    WHERE page_id = page_parent_id
-      AND page_dag_level > 0
-  );
-  
-  -- Summary report with hierarchy preservation and orphan repair metrics
   SELECT 
-    'Simple Identity Conversion with Hierarchy Preservation & Orphan Repair Complete' AS status,
-    FORMAT(v_total_processed, 0) AS pages_converted,
-    FORMAT(v_identity_pages, 0) AS identity_pages_created,
-    FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
-    FORMAT(v_preserved_hierarchy_pages, 0) AS hierarchy_representatives_preserved,
-    FORMAT(v_orphans_repaired, 0) AS standard_orphans_repaired,
-    FORMAT(v_self_ref_repaired, 0) AS self_ref_repaired,
-    FORMAT(v_self_ref_unresolved, 0) AS self_ref_unresolved,
-    FORMAT(@remaining_orphans, 0) AS remaining_orphans,
-    FORMAT(@self_references, 0) AS self_references,
-    CASE 
-      WHEN @remaining_orphans = v_self_ref_unresolved AND @self_references = 0 
-        THEN 'SUCCESS - Only unresolvable orphans remain'
-      WHEN @self_references = 0 
-        THEN 'SUCCESS - No self-references created'
-      ELSE CONCAT('WARNING - ', @self_references, ' self-references exist')
-    END AS repair_status,
+    'Phase 2 Complete: Orphan Repair' AS status,
+    FORMAT(v_orphans_repaired, 0) AS standard_orphans_fixed,
+    FORMAT(v_self_ref_repaired, 0) AS self_ref_fixed,
+    FORMAT(v_self_ref_unresolved, 0) AS unresolved_orphans,
+    ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+  
+  -- Update build state
+  INSERT INTO clean_build_state (state_key, state_value, state_text) 
+  VALUES ('build_status', 100, 'Conversion completed - ready for weak branch filtering')
+  ON DUPLICATE KEY UPDATE state_value = 100;
+  
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('total_representatives', v_total_processed)
+  ON DUPLICATE KEY UPDATE state_value = v_total_processed;
+  
+  -- Final report
+  SELECT 
+    'COMPLETE - SASS Page Deduplication' AS final_status,
+    FORMAT(v_total_processed, 0) AS representatives_created,
+    FORMAT(v_orphans_repaired + v_self_ref_repaired, 0) AS total_orphans_repaired,
+    FORMAT(v_self_ref_unresolved, 0) AS unresolved_orphans,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
-  -- Hierarchy preservation validation
+  -- Verification
   SELECT 
-    'Hierarchy Preservation Validation' AS validation_type,
-    'Levels 0-2 Representative Preservation' AS metric,
-    COUNT(CASE WHEN spc.page_dag_level <= 2 AND sip.page_id = sip.representative_page_id THEN 1 END) AS preserved_count,
-    COUNT(CASE WHEN spc.page_dag_level <= 2 THEN 1 END) AS total_hierarchy_pages,
-    CONCAT(ROUND(100.0 * COUNT(CASE WHEN spc.page_dag_level <= 2 AND sip.page_id = sip.representative_page_id THEN 1 END) / 
-                 COUNT(CASE WHEN spc.page_dag_level <= 2 THEN 1 END), 1), '%') AS preservation_rate
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id;
+    'Data Integrity Check' AS check_type,
+    'Self-references' as issue,
+    COUNT(*) as count
+  FROM sass_page_clean 
+  WHERE page_id = page_parent_id AND page_dag_level > 0
+  
+  UNION ALL
+  
+  SELECT 
+    'Data Integrity Check',
+    'Orphans',
+    COUNT(*)
+  FROM sass_page_clean c 
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_dag_level > 0 AND c.page_dag_level <= 7 AND p.page_id IS NULL;
+
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- WEAK BRANCH FILTERING PROCEDURE
+-- ========================================
+
+DROP PROCEDURE IF EXISTS FilterWeakBranches;
+
+DELIMITER //
+
+CREATE PROCEDURE FilterWeakBranches()
+BEGIN
+  DECLARE v_start_time DECIMAL(14,3);
+  DECLARE v_iteration INT DEFAULT 0;
+  DECLARE v_changes INT DEFAULT 1;
+  DECLARE v_total_filtered INT DEFAULT 0;
+  DECLARE v_current_level INT;
+  DECLARE v_filtered_this_pass INT;
+  DECLARE v_reparented INT;
+  
+  SET v_start_time = UNIX_TIMESTAMP();
+  
+  INSERT INTO clean_build_state (state_key, state_value, state_text) 
+  VALUES ('filter_phase', 1, 'Filtering weak branches')
+  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Filtering weak branches';
+  
+  -- Iterate until no more changes (max 3 iterations)
+  WHILE v_changes > 0 AND v_iteration < 3 DO
+    SET v_iteration = v_iteration + 1;
+    SET v_changes = 0;
+    SET v_filtered_this_pass = 0;
+    
+    SELECT CONCAT('Iteration ', v_iteration, ': Filtering weak categories') AS status;
+    
+    -- Process levels 7 down to 3 (protect 0-2)
+    SET v_current_level = 7;
+    
+    WHILE v_current_level >= 3 DO
+      
+      -- Create temp table of weak categories at this level
+      CREATE TEMPORARY TABLE IF NOT EXISTS temp_weak_categories (
+        page_id INT UNSIGNED PRIMARY KEY,
+        child_count INT
+      ) ENGINE=MEMORY;
+      
+      TRUNCATE TABLE temp_weak_categories;
+      
+      -- Find categories with <9 children
+      INSERT INTO temp_weak_categories (page_id, child_count)
+      SELECT 
+        p.page_id,
+        COUNT(c.page_id) as child_count
+      FROM sass_page_clean p
+      LEFT JOIN sass_page_clean c ON p.page_id = c.page_parent_id
+      WHERE p.page_dag_level = v_current_level
+        AND p.page_is_leaf = 0
+      GROUP BY p.page_id
+      HAVING COUNT(c.page_id) < 9;
+      
+      -- Count affected categories
+      SET @weak_count = (SELECT COUNT(*) FROM temp_weak_categories);
+      
+      IF @weak_count > 0 THEN
+        
+        -- Reparent children to grandparent
+        UPDATE sass_page_clean c
+        JOIN temp_weak_categories wc ON c.page_parent_id = wc.page_id
+        JOIN sass_page_clean weak_parent ON wc.page_id = weak_parent.page_id
+        SET c.page_parent_id = weak_parent.page_parent_id,
+            c.page_dag_level = c.page_dag_level - 1;
+        
+        SET v_reparented = ROW_COUNT();
+        
+        -- Convert weak categories to leaves
+        UPDATE sass_page_clean p
+        JOIN temp_weak_categories wc ON p.page_id = wc.page_id
+        SET p.page_is_leaf = 1;
+        
+        SET v_changes = v_changes + @weak_count;
+        SET v_filtered_this_pass = v_filtered_this_pass + @weak_count;
+        
+        SELECT 
+          CONCAT('  Level ', v_current_level) AS level_status,
+          FORMAT(@weak_count, 0) AS categories_filtered,
+          FORMAT(v_reparented, 0) AS children_reparented,
+          ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+      END IF;
+      
+      DROP TEMPORARY TABLE IF EXISTS temp_weak_categories;
+      SET v_current_level = v_current_level - 1;
+      
+    END WHILE;
+    
+    SET v_total_filtered = v_total_filtered + v_filtered_this_pass;
+    
+    SELECT 
+      CONCAT('Iteration ', v_iteration, ' Complete') AS iteration_status,
+      FORMAT(v_filtered_this_pass, 0) AS categories_filtered_this_pass,
+      FORMAT(v_total_filtered, 0) AS total_filtered_so_far,
+      CASE WHEN v_changes = 0 THEN 'STABLE - No more changes' ELSE 'CONTINUING' END AS convergence_status,
+      ROUND(UNIX_TIMESTAMP() - v_start_time, 1) AS elapsed_sec;
+    
+  END WHILE;
+  
+  -- Delete orphaned leaves (pages whose entire ancestor chain was filtered)
+  DELETE FROM sass_page_clean
+  WHERE page_is_leaf = 1
+    AND page_dag_level > 0
+    AND NOT EXISTS (
+      SELECT 1 FROM sass_page_clean p 
+      WHERE p.page_id = sass_page_clean.page_parent_id
+    );
+  
+  SET @deleted_orphans = ROW_COUNT();
+  
+  -- Update build state
+  INSERT INTO clean_build_state (state_key, state_value, state_text) 
+  VALUES ('filter_status', 100, 'Weak branch filtering completed')
+  ON DUPLICATE KEY UPDATE state_value = 100;
+  
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('total_filtered', v_total_filtered)
+  ON DUPLICATE KEY UPDATE state_value = v_total_filtered;
+  
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('filter_iterations', v_iteration)
+  ON DUPLICATE KEY UPDATE state_value = v_iteration;
+  
+  -- Final report
+  SELECT 
+    'COMPLETE - Weak Branch Filtering' AS final_status,
+    FORMAT(v_total_filtered, 0) AS total_categories_filtered,
+    FORMAT(@deleted_orphans, 0) AS orphaned_leaves_deleted,
+    v_iteration AS iterations_completed,
+    FORMAT((SELECT COUNT(*) FROM sass_page_clean), 0) AS final_representative_count,
+    ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
+  
+  -- Category size distribution after filtering
+  SELECT 
+    'Category Size After Filtering' AS distribution_type,
+    CASE 
+      WHEN child_count = 0 THEN '0 (leaves)'
+      WHEN child_count < 9 THEN '1-8 (should not exist for levels 3+)'
+      WHEN child_count < 20 THEN '9-19'
+      WHEN child_count < 50 THEN '20-49'
+      WHEN child_count < 100 THEN '50-99'
+      ELSE '100+'
+    END as size_range,
+    COUNT(*) as category_count
+  FROM (
+    SELECT p.page_id, p.page_dag_level, COUNT(c.page_id) as child_count
+    FROM sass_page_clean p
+    LEFT JOIN sass_page_clean c ON p.page_id = c.page_parent_id
+    WHERE p.page_is_leaf = 0
+    GROUP BY p.page_id, p.page_dag_level
+  ) counts
+  GROUP BY size_range
+  ORDER BY 
+    CASE size_range
+      WHEN '0 (leaves)' THEN 1
+      WHEN '1-8 (should not exist for levels 3+)' THEN 2
+      WHEN '9-19' THEN 3
+      WHEN '20-49' THEN 4
+      WHEN '50-99' THEN 5
+      ELSE 6
+    END;
+
+END//
+
+DELIMITER ;
+
+-- ========================================
+-- COMBINED PROCEDURE
+-- ========================================
+
+DROP PROCEDURE IF EXISTS BuildSASSPageCleanComplete;
+
+DELIMITER //
+
+CREATE PROCEDURE BuildSASSPageCleanComplete()
+BEGIN
+  DECLARE v_overall_start DECIMAL(14,3);
+  
+  SET v_overall_start = UNIX_TIMESTAMP();
+  
+  SELECT 'Starting Complete SASS Page Clean Build' AS status;
+  
+  -- Phase 1: Deduplication and orphan repair
+  CALL ConvertSASSPageClean();
+  
+  -- Phase 2: Weak branch filtering
+  CALL FilterWeakBranches();
+  
+  -- Overall summary
+  SELECT 
+    'BUILD COMPLETE - sass_page_clean Ready' AS final_status,
+    FORMAT((SELECT COUNT(*) FROM sass_page_clean), 0) AS final_page_count,
+    FORMAT((SELECT COUNT(*) FROM sass_page_clean WHERE page_is_leaf = 1), 0) AS articles,
+    FORMAT((SELECT COUNT(*) FROM sass_page_clean WHERE page_is_leaf = 0), 0) AS categories,
+    ROUND(UNIX_TIMESTAMP() - v_overall_start, 2) AS total_build_time_sec;
+  
+  -- Level distribution
+  SELECT 
+    'Final Level Distribution' AS distribution_type,
+    page_dag_level AS level,
+    FORMAT(COUNT(*), 0) AS page_count,
+    CONCAT(ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM sass_page_clean), 1), '%') AS percentage
+  FROM sass_page_clean
+  GROUP BY page_dag_level
+  ORDER BY page_dag_level;
 
 END//
 
@@ -748,283 +497,84 @@ DELIMITER ;
 -- UTILITY PROCEDURES
 -- ========================================
 
--- Procedure to test enhanced title cleaning function
-DROP PROCEDURE IF EXISTS TestEnhancedTitleCleaning;
+DROP PROCEDURE IF EXISTS ValidateSASSPageClean;
 
 DELIMITER //
 
-CREATE PROCEDURE TestEnhancedTitleCleaning(
-  IN p_test_title VARCHAR(255)
-)
+CREATE PROCEDURE ValidateSASSPageClean()
 BEGIN
   SELECT 
-    'Enhanced Title Cleaning Test' AS test_type,
-    p_test_title AS original_title,
-    clean_page_title_enhanced(p_test_title) AS cleaned_title,
-    LENGTH(p_test_title) AS original_length,
-    LENGTH(clean_page_title_enhanced(p_test_title)) AS cleaned_length;
-END//
-
-DELIMITER ;
-
--- Procedure to analyze identity page mapping with hierarchy preservation
-DROP PROCEDURE IF EXISTS AnalyzeIdentityMapping;
-
-DELIMITER //
-
-CREATE PROCEDURE AnalyzeIdentityMapping()
-BEGIN
-  -- Title group size distribution
+    'Validation: Self-References' AS check_type,
+    COUNT(*) as count,
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END as status
+  FROM sass_page_clean 
+  WHERE page_id = page_parent_id AND page_dag_level > 0
+  
+  UNION ALL
+  
   SELECT 
-    'Identity Group Size Distribution' AS analysis_type,
-    pages_per_title,
-    COUNT(*) AS title_count,
-    ROUND(100.0 * COUNT(*) / (SELECT COUNT(DISTINCT page_title) FROM sass_identity_pages), 1) AS percentage
+    'Validation: Orphans (levels 1-7)',
+    COUNT(*),
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'WARNING' END
+  FROM sass_page_clean c 
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_dag_level > 0 AND c.page_dag_level <= 7 AND p.page_id IS NULL
+  
+  UNION ALL
+  
+  SELECT 
+    'Validation: Small Categories (levels 3-7)',
+    COUNT(*),
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END
   FROM (
-    SELECT page_title, COUNT(*) AS pages_per_title
-    FROM sass_identity_pages
-    GROUP BY page_title
-  ) AS title_groups
-  GROUP BY pages_per_title
-  ORDER BY pages_per_title;
-  
-  -- Hierarchy preservation analysis
-  SELECT 
-    'Hierarchy Preservation Analysis' AS analysis_type,
-    spc.page_dag_level,
-    COUNT(*) AS total_pages,
-    COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS representatives,
-    COUNT(CASE WHEN sip.page_id != sip.representative_page_id THEN 1 END) AS non_representatives,
-    CONCAT(ROUND(100.0 * COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) / COUNT(*), 1), '%') AS representation_rate
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 5
-  GROUP BY spc.page_dag_level
-  ORDER BY spc.page_dag_level;
-  
-  -- Largest identity groups with hierarchy status
-  SELECT 
-    'Largest Identity Groups with Hierarchy Status' AS analysis_type,
-    page_title,
-    COUNT(*) AS pages_in_group,
-    representative_page_id,
-    MAX(spc.page_dag_level) AS max_level,
-    MIN(spc.page_dag_level) AS min_level,
-    CASE WHEN MIN(spc.page_dag_level) <= 2 THEN 'HIERARCHY PRESERVED' ELSE 'STANDARD SELECTION' END AS selection_method
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  GROUP BY page_title, representative_page_id
-  ORDER BY COUNT(*) DESC
-  LIMIT 20;
-  
-  -- Representative selection analysis with hierarchy metrics
-  SELECT 
-    'Representative Selection Analysis with Hierarchy' AS analysis_type,
-    'Total representatives' AS selection_type,
-    COUNT(DISTINCT representative_page_id) AS count
-  FROM sass_identity_pages
-  
-  UNION ALL
-  
-  SELECT 
-    'Representative Selection Analysis with Hierarchy',
-    'Hierarchy representatives (levels 0-2)',
-    COUNT(DISTINCT sip.representative_page_id)
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2
-  
-  UNION ALL
-  
-  SELECT 
-    'Representative Selection Analysis with Hierarchy',
-    'Standard representatives (levels 3+)',
-    COUNT(DISTINCT sip.representative_page_id)
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.representative_page_id = spc.page_id
-  WHERE spc.page_dag_level > 2;
-
-END//
-
-DELIMITER ;
-
--- Procedure to validate hierarchy preservation
-DROP PROCEDURE IF EXISTS ValidateHierarchyPreservation;
-
-DELIMITER //
-
-CREATE PROCEDURE ValidateHierarchyPreservation()
-BEGIN
-  -- Check if any original hierarchy pages lost representative status
-  SELECT 
-    'Hierarchy Preservation Validation' AS validation_type,
-    COUNT(*) AS total_hierarchy_pages,
-    COUNT(CASE WHEN sip.page_id = sip.representative_page_id THEN 1 END) AS preserved_as_representatives,
-    COUNT(CASE WHEN sip.page_id != sip.representative_page_id THEN 1 END) AS demoted_from_representative,
-    CASE 
-      WHEN COUNT(CASE WHEN sip.page_id != sip.representative_page_id THEN 1 END) = 0 THEN 'PASS - All hierarchy pages preserved'
-      ELSE 'FAIL - Some hierarchy pages demoted'
-    END AS validation_status
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2;
-  
-  -- Show any demoted hierarchy pages (should be empty)
-  SELECT 
-    'Demoted Hierarchy Pages (Should be Empty)' AS issue_type,
-    sip.page_id,
-    sip.page_title,
-    spc.page_dag_level,
-    sip.representative_page_id AS demoted_to_representative
-  FROM sass_identity_pages sip
-  JOIN sass_page_clean spc ON sip.page_id = spc.page_id
-  WHERE spc.page_dag_level <= 2
-    AND sip.page_id != sip.representative_page_id
-  LIMIT 10;
+    SELECT p.page_id, p.page_dag_level, COUNT(c.page_id) as child_count
+    FROM sass_page_clean p
+    LEFT JOIN sass_page_clean c ON p.page_id = c.page_parent_id
+    WHERE p.page_is_leaf = 0 AND p.page_dag_level >= 3
+    GROUP BY p.page_id, p.page_dag_level
+    HAVING COUNT(c.page_id) < 9
+  ) small_cats;
 
 END//
 
 DELIMITER ;
 
 -- ========================================
--- USAGE EXAMPLES AND DOCUMENTATION
+-- USAGE EXAMPLES
 -- ========================================
 
 /*
--- ENHANCED TITLE CLEANING WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
--- FIXED: MySQL Error 1093 - uses temporary table approach to avoid self-reference
--- FIXED: Self-reference circular loops - uses grandparent fallback
--- DEFAULT: Processes levels 0-10 (stops at level 10)
+-- Full build with deduplication and filtering
+CALL BuildSASSPageCleanComplete();
 
--- Standard conversion with all features:
-CALL ConvertSASSPageCleanWithIdentity(100000);
+-- Or run phases separately
+CALL ConvertSASSPageClean();
+CALL FilterWeakBranches();
 
--- Simple conversion (single-pass, faster, DEFAULT STOPS AT LEVEL 10):
-CALL ConvertSASSPageCleanWithIdentitySimple();
+-- Validate results
+CALL ValidateSASSPageClean();
 
--- Test enhanced title cleaning:
-CALL TestEnhancedTitleCleaning('Technology');
-CALL TestEnhancedTitleCleaning('Machine Learning (AI)');
-
--- Analyze identity mapping with hierarchy metrics:
-CALL AnalyzeIdentityMapping();
-
--- Validate hierarchy preservation:
-CALL ValidateHierarchyPreservation();
-
--- Check conversion status:
+-- Check build status
 SELECT * FROM clean_build_state ORDER BY updated_at DESC;
 
--- Verify orphan repair success (all should be 0 except possibly unresolved self-refs):
+-- Verify final counts
 SELECT 
-  'Level 0 with non-zero parent' as violation_type, 
-  COUNT(*) as count 
-FROM sass_page_clean 
-WHERE page_dag_level = 0 AND page_parent_id != 0
+  COUNT(*) as total,
+  COUNT(CASE WHEN page_is_leaf = 1 THEN 1 END) as articles,
+  COUNT(CASE WHEN page_is_leaf = 0 THEN 1 END) as categories
+FROM sass_page_clean;
 
-UNION ALL
-
-SELECT 
-  'Missing parent (orphans)', 
-  COUNT(*) 
-FROM sass_page_clean c 
-LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
-WHERE c.page_dag_level > 0 
-  AND c.page_dag_level <= 10
-  AND p.page_id IS NULL
-
-UNION ALL
-
-SELECT 
-  'Self-references (page_id = parent_id)', 
-  COUNT(*) 
-FROM sass_page_clean
-WHERE page_id = page_parent_id
-  AND page_dag_level > 0
-
-UNION ALL
-
-SELECT 
-  'Wrong parent level', 
-  COUNT(*) 
-FROM sass_page_clean c 
-JOIN sass_page_clean p ON c.page_parent_id = p.page_id 
-WHERE c.page_dag_level > 0 
-  AND c.page_dag_level <= 10
-  AND p.page_dag_level != c.page_dag_level - 1;
-
--- Expected results:
--- Level 0 with non-zero parent: 0
--- Missing parent (orphans): small number (only unresolvable self-refs without grandparents)
--- Self-references: 0
--- Wrong parent level: 0 (except for unresolvable self-refs)
-
-KEY FEATURES IN THIS VERSION:
-1. Modified representative selection to prioritize pages with page_dag_level <= 2
-2. Original Wiki_top3_levels page IDs (levels 0-2) maintain representative status
-3. Standard representative selection applies only to levels 3+
-4. **NEW: PHASE 3 - Automatic orphan parent reference repair**
-5. **NEW: Self-reference detection and exclusion**
-6. **NEW: Grandparent fallback for self-reference orphans**
-7. **NEW: Comprehensive tracking of repair types**
-8. **FIXED: MySQL Error 1093 - uses temporary table to avoid self-reference**
-9. **FIXED: Circular self-references prevented**
-10. **DEFAULT: Processes levels 0-10 (not 12) for better performance**
-11. Comprehensive validation procedures to verify preservation
-
-REPRESENTATIVE SELECTION CRITERIA (UPDATED):
-1. FIRST: Original hierarchy pages (page_dag_level <= 2)
-2. THEN: Highest page_dag_level (deepest in hierarchy)
-3. THEN: Prefer categories over articles
-4. FINALLY: Lowest page_id (oldest page)
-
-ORPHAN AUTO-REPAIR MECHANISM:
-- Automatically detects children pointing to missing parents
-- Separates standard orphans from self-reference orphans
-- Standard orphans: remapped to parent's representative
-- Self-reference orphans: remapped to grandparent if available
-- Uses temporary table approach to avoid MySQL Error 1093
-- Validates repair success (self_references should be 0)
-- Tracks unresolvable orphans (grandparent also orphaned)
-- Provides comprehensive metrics in build_state table
-- DEFAULT: Processes levels 0-10 only
-
-SELF-REFERENCE PROTECTION:
-- Detects when orphan.page_id = representative.page_id
-- Finds grandparent from original sass_page hierarchy
-- Uses grandparent if it exists in sass_page_clean
-- Leaves as orphan if grandparent unavailable (prevents circular reference)
-- DEFAULT: Only processes up to level 10
-
-ARCHITECTURAL FIX:
-This version solves both orphan problems:
-1. Standard orphans from representative deduplication (97% of cases)
-2. Self-reference orphans from parent-child title inversions (3% of cases)
-3. Uses identity mapping to repair references
-4. Uses grandparent fallback for self-references
-5. Ensures referential integrity after representative selection
-6. Validates zero self-references after conversion
-7. Works around MySQL self-reference limitations with temp tables
-8. DEFAULT: Stops at level 10 instead of 12 for better performance
-
-MIGRATION FROM PREVIOUS VERSION:
-If you have existing sass_page_clean data with orphans:
-1. Run: CALL ConvertSASSPageCleanWithIdentitySimple();
-2. All standard orphans will be automatically repaired (up to level 10)
-3. Self-reference orphans will use grandparent fallback
-4. Verify: Check that self_references = 0 in output
+KEY FEATURES:
+- No sass_identity_pages table (direct deduplication)
+- Processes levels 0-7 only
+- Weak branch filtering with 9-child threshold
+- Automatic orphan repair with grandparent fallback
+- Self-reference prevention
+- Iterative filtering (converges in 2-3 passes)
+- Comprehensive validation
 
 ESTIMATED RUNTIME:
-- Phase 1 (Build clean table): 5-10 minutes
-- Phase 2 (Build identity table): 2-5 minutes
-- Phase 3 (Orphan repair with self-ref protection): 2-4 minutes
-- Total: 9-19 minutes for full conversion with orphan repair
-- Faster with level 10 limit vs level 12
-
-MYSQL COMPATIBILITY:
-- Works with MySQL 5.7+
-- Works with MariaDB 10.2+
-- Uses LEFT JOIN + IS NULL pattern instead of NOT EXISTS for better compatibility
-- Temporary tables avoid self-reference limitations across all MySQL versions
-- Grandparent lookup uses original sass_page (not cleaned version)
+- Deduplication + orphan repair: 15-20 minutes
+- Weak branch filtering: 10-15 minutes
+- Total: 25-35 minutes
 */
