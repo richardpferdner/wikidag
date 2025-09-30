@@ -10,7 +10,7 @@
 - Enable fast exploration through hierarchical relationships
 - Maintain DAG structure integrity (no cycles, proper parent-child relationships)
 - Deduplicate pages with identical titles to canonical representatives
-- Filter weak branches (categories with <5 children) for quality
+- Filter weak branches (categories with <9 children) for quality
 - Complete build in <2.5 hours on Mac Studio M4 64GB
 
 ## Pipeline Architecture
@@ -24,26 +24,26 @@
 - `sass_filter_patterns` table (maintenance category filters)
 
 **Process:**
-1. Uses `wiki_top3_levels` for levels 0-2 (root categories: Business, Science, Technology, Engineering, Mathematics)
-2. Recursively traverses `categorylinks` to build levels 3-10
+1. Uses `wiki_top3_levels` for level 0 only (root categories: Business, Science, Technology, Engineering, Mathematics, Geography)
+2. Recursively traverses `categorylinks` to build levels 1-7
 3. Applies filtering to exclude maintenance/administrative categories
 4. Each page appears once per parent category (creates duplicates for pages in multiple categories)
 
 **Procedure:**
 - `BuildSASSPageTreeFiltered(begin_level, end_level, enable_filtering)`
-- Default: `(0, 10, 1)` - builds all 10 levels with filtering enabled
+- Default: `(0, 7, 1)` - builds all 7 levels with filtering enabled
 
 **Schema:**
 - `page_id`: Wikipedia page ID
 - `page_title`: Original title (with duplicates)
 - `page_parent_id`: Parent category ID
 - `page_root_id`: Root domain ID (1-5 for SASS categories)
-- `page_dag_level`: Depth in hierarchy (0-10)
+- `page_dag_level`: Depth in hierarchy (0-7)
 - `page_is_leaf`: TRUE for articles (namespace 0), FALSE for categories (namespace 14)
 
 **Distribution:**
-- Level 0: 2 pages (root categories)
-- Levels 1-10: ~9.4M total pages
+- Level 0: 6 pages (root categories)
+- Levels 1-7: ~9.4M total pages
 - ~77% articles, ~23% categories
 - Contains duplicate titles at different levels
 
@@ -110,8 +110,8 @@
 
 **Process:**
 1. Count direct children for each category (page_is_leaf = 0)
-2. Process levels 10→3 (bottom-up), protecting levels 0-2
-3. For categories with <5 direct children:
+2. Process levels 7→3 (bottom-up), protecting levels 0-2
+3. For categories with <9 direct children:
    - Reparent children to grandparent (move up one level)
    - Convert weak category to leaf (page_is_leaf = 1)
 4. Iterate 2-3 times until stable (each pass may create new weak categories)
@@ -121,7 +121,7 @@
 - `FilterWeakBranches()` or integrated into `ConvertSASSPageCleanSimple()`
 
 **Filtering Criteria:**
-- **Categories:** Must have ≥5 direct children to remain a category
+- **Categories:** Must have ≥9 direct children to remain a category
 - **Articles:** Always kept (have no children)
 - **Levels 0-2:** Never filtered (protected)
 
@@ -357,4 +357,4 @@ CREATE INDEX idx_leaf ON sass_page_clean(page_is_leaf);
 ### Phase 3: Build Associative Link Network  
 - Source: `pagelinks` + `categorylinks` → `sass_associative_link`
 - Links between representative pages only
-- Will be refactored to work with sass_page_clean o
+- Will be refactored to work with sass_page_clean only
