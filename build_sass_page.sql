@@ -1,8 +1,8 @@
 -- SASS Wikipedia Category Tree Builder - Simplified
 -- Builds materialized DAG tree of SASS categories and articles
--- Uses pre-computed wiki_top3_levels for levels 0-2, recursive for levels 3-10
+-- Uses pre-computed wiki_top3_levels for level 0, recursive for levels 1-7
 -- Applies optional filtering to exclude maintenance/administrative categories
--- Processes levels 0-10 only
+-- Processes levels 0-7 only
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -146,7 +146,7 @@ BEGIN
   
   -- Set defaults
   IF p_begin_level IS NULL THEN SET p_begin_level = 0; END IF;
-  IF p_end_level IS NULL THEN SET p_end_level = 10; END IF;
+  IF p_end_level IS NULL THEN SET p_end_level = 7; END IF;
   IF p_enable_filtering IS NULL THEN SET p_enable_filtering = 1; END IF;
 
   SET v_start_time = UNIX_TIMESTAMP();
@@ -207,7 +207,7 @@ BEGIN
     SET v_current_level = p_begin_level;
   END IF;
   
-  -- Build levels 3-10 recursively
+  -- Build levels 1-7 recursively
   WHILE v_continue = 1 AND v_current_level <= p_end_level DO
     
     -- Clear working table for new level
@@ -330,45 +330,34 @@ DELIMITER ;
 -- ========================================
 
 /*
--- Standard build with filtering (levels 0-10)
-CALL BuildSASSPageTreeFiltered(0, 10, 1);
+-- Drop existing data
+DROP TABLE IF EXISTS sass_identity_pages;DROP TABLE IF EXISTS sass_page_clean;DROP TABLE IF EXISTS sass_page;DROP TABLE IF EXISTS sass_cycles;
+
+-- Load and build (levels 0-7)
+source build_sass_page.sql;
+CALL BuildSASSPageTreeFiltered(0, 7, 1);
 
 -- Build without filtering
-CALL BuildSASSPageTreeFiltered(0, 10, 0);
+CALL BuildSASSPageTreeFiltered(0, 7, 0);
 
 -- Resume from level 5
-CALL BuildSASSPageTreeFiltered(5, 10, 1);
+CALL BuildSASSPageTreeFiltered(5, 7, 1);
 
 -- Check results
-SELECT 
-  page_dag_level,
-  COUNT(*) AS total_rows,
-  COUNT(DISTINCT page_id) AS unique_pages,
-  COUNT(DISTINCT page_title) AS unique_titles
-FROM sass_page
-GROUP BY page_dag_level
-ORDER BY page_dag_level;
+SELECT page_dag_level, COUNT(*) AS total_rows, COUNT(DISTINCT page_id) AS unique_pages, COUNT(DISTINCT page_title) AS unique_titles FROM sass_page GROUP BY page_dag_level ORDER BY page_dag_level;
 
 -- Find pages with multiple parents
-SELECT 
-  page_id,
-  page_title,
-  COUNT(*) AS parent_count
-FROM sass_page
-GROUP BY page_id, page_title
-HAVING COUNT(*) > 1
-ORDER BY COUNT(*) DESC
-LIMIT 20;
+SELECT page_id, page_title, COUNT(*) AS parent_count FROM sass_page GROUP BY page_id, page_title HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC LIMIT 20;
 
 PREREQUISITES:
-1. wiki_top3_levels table must exist
+1. wiki_top3_levels table must exist with root categories (level 0)
 2. sass_filter_patterns should be populated if filtering enabled
 3. sass_roots should contain root category mappings
 
 NOTES:
 - Creates ~9.4M rows (with duplicates for multi-parent pages)
-- Levels 0-2 built from wiki_top3_levels (faster, more accurate)
-- Levels 3-10 built recursively from categorylinks
+- Level 0 built from wiki_top3_levels (root categories only)
+- Levels 1-7 built recursively from categorylinks
 - Optional filtering excludes maintenance/administrative categories
 - Console logging shows progress after each level
 - No persistent tracking tables (restart from scratch on failure)
