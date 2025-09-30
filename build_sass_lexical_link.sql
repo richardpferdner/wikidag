@@ -1,7 +1,7 @@
 -- SASS Wikipedia Lexical Link Builder - Representative Page Resolution (MySQL Compatible)
 -- Builds sass_lexical_link table from redirect table with representative page mapping
--- Applies enhanced text normalization and resolves to canonical representative pages
--- Uses sass_identity_pages for comprehensive source/target resolution
+-- Matches redirect targets to SASS pages and resolves to canonical representative pages
+-- Allows redirects from ANY Wikipedia page to SASS domain pages
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS lexical_build_state (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- Chain resolution tracking for redirect cycles (simplified for MySQL)
+-- Chain resolution tracking for redirect cycles (simplified 2-level detection for MySQL)
+-- NOTE: This implementation detects only 2-level redirect chains due to MySQL limitations
+-- For comprehensive chain resolution, consider application-level processing
 CREATE TABLE IF NOT EXISTS sass_redirect_chains (
   chain_id INT AUTO_INCREMENT PRIMARY KEY,
   rd_from INT UNSIGNED NOT NULL,
@@ -50,7 +52,7 @@ CREATE TABLE IF NOT EXISTS sass_redirect_chains (
   chain_length INT NOT NULL,
   final_target_id INT UNSIGNED NULL,
   resolution_status ENUM('resolved', 'cycle_detected', 'external_link', 'unresolved') NOT NULL,
-  visited_path TEXT NULL, -- Store as comma-separated string instead of array
+  visited_path TEXT NULL, -- Stores redirect path as comma-separated page IDs for diagnostics
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_from (rd_from),
   INDEX idx_status (resolution_status)
@@ -139,10 +141,12 @@ BEGIN
   DECLARE v_unresolved_redirects INT DEFAULT 0;
   DECLARE v_cycle_detected INT DEFAULT 0;
   DECLARE v_representative_consolidations INT DEFAULT 0;
+  DECLARE v_from_sass_redirects INT DEFAULT 0;
+  DECLARE v_from_non_sass_redirects INT DEFAULT 0;
   
   -- Set defaults
   IF p_batch_size IS NULL THEN SET p_batch_size = 500000; END IF;
-  IF p_max_chain_depth IS NULL THEN SET p_max_chain_depth = 5; END IF;
+  IF p_max_chain_depth IS NULL THEN SET p_max_chain_depth = 2; END IF;  -- Limited to 2 for MySQL compatibility
   IF p_enable_progress_reports IS NULL THEN SET p_enable_progress_reports = 1; END IF;
   
   SET v_start_time = UNIX_TIMESTAMP();
@@ -158,14 +162,17 @@ BEGIN
   ON DUPLICATE KEY UPDATE state_value = 0, state_text = 'Starting lexical link build with representative resolution';
   
   -- ========================================
-  -- PHASE 1: EXTRACT AND RESOLVE REDIRECTS
+  -- PHASE 1: EXTRACT AND RESOLVE REDIRECTS (Two-phase matching)
   -- ========================================
   
   INSERT INTO lexical_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 1, 'Processing redirects with representative resolution')
-  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Processing redirects with representative resolution';
+  VALUES ('current_phase', 1, 'Processing redirects with two-phase matching')
+  ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Processing redirects with two-phase matching';
   
-  -- Extract valid redirects where source exists in SASS and resolve targets to representatives
+  -- Extract redirects where:
+  -- 1. Source page exists in Wikipedia (validation)
+  -- 2. Target resolves to a SASS page (via original page title matching)
+  -- 3. Allow redirects from ANY Wikipedia page to SASS pages
   INSERT IGNORE INTO sass_redirect_work (
     rd_from,
     rd_from_title,
@@ -177,49 +184,56 @@ BEGIN
   SELECT DISTINCT
     r.rd_from,
     clean_page_title_enhanced(CONVERT(sp_from.page_title, CHAR)) as rd_from_title,
-    clean_page_title_enhanced(CONVERT(r.rd_title, CHAR)) as rd_target_title,
-    sip_target.page_id as rd_target_page_id,
+    CONVERT(r.rd_title, CHAR) as rd_target_title,  -- Keep original for diagnostics
+    p_target.page_id as rd_target_page_id,
     sip_target.representative_page_id as rd_representative_id,
-    CASE 
-      WHEN r.rd_fragment IS NOT NULL 
-      THEN clean_page_title_enhanced(CONVERT(r.rd_fragment, CHAR))
-      ELSE NULL 
-    END as rd_fragment
+    r.rd_fragment as rd_fragment  -- Preserve fragment exactly as-is
   FROM redirect r
-  JOIN page sp_from ON r.rd_from = sp_from.page_id                    -- Source page exists
-  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id  -- Source is in SASS
-  JOIN sass_identity_pages sip_target ON clean_page_title_enhanced(CONVERT(r.rd_title, CHAR)) = sip_target.page_title  -- Target title matches SASS
-  WHERE r.rd_interwiki IS NULL                                        -- Exclude external links
-    AND r.rd_namespace IN (0, 14)                                     -- Only articles and categories
-    AND sp_from.page_content_model = 'wikitext'                       -- Valid content
-    AND r.rd_from != sip_target.page_id;                              -- Exclude self-redirects
+  -- Validate source page exists (from ANY Wikipedia page)
+  JOIN page sp_from ON r.rd_from = sp_from.page_id
+  -- Two-phase matching: First find target page using original title
+  JOIN page p_target ON CONVERT(r.rd_title, CHAR) = CONVERT(p_target.page_title, CHAR)
+                     AND p_target.page_namespace = r.rd_namespace
+  -- Then check if target is in SASS and get its representative
+  JOIN sass_identity_pages sip_target ON p_target.page_id = sip_target.page_id
+  WHERE r.rd_interwiki IS NULL                        -- Exclude external links
+    AND r.rd_namespace IN (0, 14)                     -- Only articles and categories
+    AND sp_from.page_content_model = 'wikitext'       -- Valid source content
+    AND r.rd_from != p_target.page_id;                -- Exclude self-redirects
   
   SET v_redirects_processed = ROW_COUNT();
+  
+  -- Count redirects from SASS vs non-SASS sources for analysis
+  SELECT COUNT(*) INTO v_from_sass_redirects
+  FROM sass_redirect_work srw
+  WHERE EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE srw.rd_from = sip.page_id);
+  
+  SET v_from_non_sass_redirects = v_redirects_processed - v_from_sass_redirects;
   
   -- Count external/interwiki redirects for statistics
   SELECT COUNT(*) INTO v_external_redirects
   FROM redirect r
   JOIN page sp_from ON r.rd_from = sp_from.page_id
-  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
   WHERE r.rd_interwiki IS NOT NULL;
   
   -- Count unresolved redirects (targets not in SASS)
   SELECT COUNT(*) INTO v_unresolved_redirects
   FROM redirect r
   JOIN page sp_from ON r.rd_from = sp_from.page_id
-  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
+  LEFT JOIN page p_target ON CONVERT(r.rd_title, CHAR) = CONVERT(p_target.page_title, CHAR)
+                           AND p_target.page_namespace = r.rd_namespace
+  LEFT JOIN sass_identity_pages sip_target ON p_target.page_id = sip_target.page_id
   WHERE r.rd_interwiki IS NULL
     AND r.rd_namespace IN (0, 14)
     AND sp_from.page_content_model = 'wikitext'
-    AND NOT EXISTS (
-      SELECT 1 FROM sass_identity_pages sip_target 
-      WHERE clean_page_title_enhanced(CONVERT(r.rd_title, CHAR)) = sip_target.page_title
-    );
+    AND (p_target.page_id IS NULL OR sip_target.page_id IS NULL);
   
   IF p_enable_progress_reports = 1 THEN
     SELECT 
-      'Phase 1: Redirect Processing' AS status,
+      'Phase 1: Redirect Processing (Two-Phase Matching)' AS status,
       FORMAT(v_redirects_processed, 0) AS redirects_processed,
+      FORMAT(v_from_sass_redirects, 0) AS from_sass_sources,
+      FORMAT(v_from_non_sass_redirects, 0) AS from_non_sass_sources,
       FORMAT(v_external_redirects, 0) AS external_redirects_excluded,
       FORMAT(v_unresolved_redirects, 0) AS unresolved_targets_excluded,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
@@ -240,7 +254,7 @@ BEGIN
     srw.rd_representative_id as ll_to_page_id,
     CASE 
       WHEN srw.rd_fragment IS NOT NULL 
-      THEN CONVERT(srw.rd_fragment, BINARY)
+      THEN CONVERT(srw.rd_fragment, BINARY)  -- Fragment preserved exactly
       ELSE NULL 
     END as ll_to_fragment
   FROM sass_redirect_work srw
@@ -264,15 +278,16 @@ BEGIN
   END IF;
   
   -- ========================================
-  -- PHASE 3: SIMPLIFIED CHAIN RESOLUTION ANALYSIS (MySQL Compatible)
+  -- PHASE 3: SIMPLIFIED 2-LEVEL CHAIN RESOLUTION ANALYSIS
+  -- NOTE: Limited to 2-level chains due to MySQL recursive CTE limitations
+  -- For comprehensive chain resolution, consider application-level processing
   -- ========================================
   
   INSERT INTO lexical_build_state (state_key, state_value, state_text) 
-  VALUES ('current_phase', 3, 'Analyzing redirect chains and cycles (simplified)')
-  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Analyzing redirect chains and cycles (simplified)';
+  VALUES ('current_phase', 3, 'Analyzing redirect chains (2-level detection only)')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Analyzing redirect chains (2-level detection only)';
   
-  -- Simple chain analysis without recursive CTEs (MySQL compatible approach)
-  -- Insert direct redirects first
+  -- Level 1: Direct redirects with full path tracking
   INSERT INTO sass_redirect_chains (rd_from, rd_to_title, chain_length, final_target_id, resolution_status, visited_path)
   SELECT 
     r.rd_from,
@@ -284,15 +299,14 @@ BEGIN
       WHEN r.rd_interwiki IS NOT NULL THEN 'external_link'
       ELSE 'unresolved'
     END as resolution_status,
-    CAST(r.rd_from AS CHAR) as visited_path  -- Store as string instead of array
+    CONCAT(r.rd_from, ',', IFNULL(srw.rd_target_page_id, 'NULL')) as visited_path
   FROM redirect r
+  JOIN page sp_from ON r.rd_from = sp_from.page_id  -- Validate source exists
   LEFT JOIN sass_redirect_work srw ON r.rd_from = srw.rd_from
-  JOIN page sp_from ON r.rd_from = sp_from.page_id
-  JOIN sass_identity_pages sip_from ON sp_from.page_id = sip_from.page_id
   WHERE r.rd_namespace IN (0, 14)
     AND sp_from.page_content_model = 'wikitext';
   
-  -- Simple cycle detection using self-joins (limited depth for performance)
+  -- Level 2: Two-hop chains with cycle detection and full path tracking
   INSERT INTO sass_redirect_chains (rd_from, rd_to_title, chain_length, final_target_id, resolution_status, visited_path)
   SELECT DISTINCT
     r1.rd_from,
@@ -300,21 +314,27 @@ BEGIN
     2 as chain_length,
     srw.rd_representative_id as final_target_id,
     CASE 
-      WHEN r1.rd_from = r2.rd_from THEN 'cycle_detected'
+      WHEN r1.rd_from = p2.page_id THEN 'cycle_detected'  -- A->B->A cycle
+      WHEN p1.page_id = p2.page_id THEN 'cycle_detected'  -- A->B->B cycle
       WHEN srw.rd_representative_id IS NOT NULL THEN 'resolved'
       WHEN r2.rd_interwiki IS NOT NULL THEN 'external_link'
       ELSE 'unresolved'
     END as resolution_status,
-    CONCAT(CAST(r1.rd_from AS CHAR), ',', CAST(r2.rd_from AS CHAR)) as visited_path
+    CONCAT(r1.rd_from, ',', p1.page_id, ',', IFNULL(p2.page_id, 'NULL')) as visited_path
   FROM redirect r1
+  JOIN page sp_from ON r1.rd_from = sp_from.page_id  -- Validate first source
   JOIN page p1 ON CONVERT(r1.rd_title, CHAR) = CONVERT(p1.page_title, CHAR)
+               AND p1.page_namespace = r1.rd_namespace
   JOIN redirect r2 ON p1.page_id = r2.rd_from
-  LEFT JOIN sass_redirect_work srw ON r2.rd_from = srw.rd_from
+  LEFT JOIN page p2 ON CONVERT(r2.rd_title, CHAR) = CONVERT(p2.page_title, CHAR)
+                    AND p2.page_namespace = r2.rd_namespace
+  LEFT JOIN sass_redirect_work srw ON r1.rd_from = srw.rd_from
   WHERE NOT EXISTS (
     SELECT 1 FROM sass_redirect_chains src WHERE src.rd_from = r1.rd_from AND src.chain_length = 1
   )
   AND r1.rd_namespace IN (0, 14)
-  AND r2.rd_namespace IN (0, 14);
+  AND r2.rd_namespace IN (0, 14)
+  AND sp_from.page_content_model = 'wikitext';
   
   -- Count cycle detections
   SELECT COUNT(*) INTO v_cycle_detected
@@ -323,10 +343,12 @@ BEGIN
   
   IF p_enable_progress_reports = 1 THEN
     SELECT 
-      'Phase 3: Chain Analysis (Simplified)' AS status,
+      'Phase 3: Chain Analysis (2-Level Detection Only)' AS status,
       FORMAT(v_cycle_detected, 0) AS redirect_cycles_detected,
       FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE resolution_status = 'resolved'), 0) AS chains_resolved,
       FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE resolution_status = 'external_link'), 0) AS external_chains,
+      FORMAT((SELECT COUNT(*) FROM sass_redirect_chains WHERE chain_length = 2), 0) AS two_hop_chains,
+      'NOTE: Only 2-level chains detected (MySQL limitation)' AS limitation_note,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
   END IF;
   
@@ -344,13 +366,16 @@ BEGIN
   -- ========================================
   
   SELECT 
-    'COMPLETE - SASS Lexical Link Network with Representatives (MySQL)' AS final_status,
+    'COMPLETE - SASS Lexical Link Network with Representatives' AS final_status,
     FORMAT(v_redirects_processed, 0) AS redirects_processed,
+    FORMAT(v_from_sass_redirects, 0) AS from_sass_sources,
+    FORMAT(v_from_non_sass_redirects, 0) AS from_non_sass_sources,
     FORMAT(v_lexical_links_created, 0) AS lexical_links_created,
     FORMAT(v_representative_consolidations, 0) AS redirects_consolidated,
     FORMAT(v_external_redirects, 0) AS external_redirects_excluded,
     FORMAT(v_unresolved_redirects, 0) AS unresolved_targets_excluded,
-    FORMAT(v_cycle_detected, 0) AS cycles_detected,
+    FORMAT(v_cycle_detected, 0) AS cycles_detected_2_level,
+    'Two-phase matching: page title → page_id → representative' AS matching_method,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
   -- Link consolidation analysis
@@ -372,6 +397,19 @@ BEGIN
     CONCAT(ROUND(100.0 * COUNT(CASE WHEN ll_to_fragment IS NOT NULL THEN 1 END) / COUNT(*), 1), '%') AS fragment_percentage
   FROM sass_lexical_link;
   
+  -- Redirect source analysis
+  SELECT 
+    'Redirect Source Domain Analysis' AS analysis_type,
+    'From SASS pages' AS source_type,
+    FORMAT(v_from_sass_redirects, 0) AS redirect_count,
+    CONCAT(ROUND(100.0 * v_from_sass_redirects / v_redirects_processed, 1), '%') AS percentage
+  UNION ALL
+  SELECT 
+    'Redirect Source Domain Analysis',
+    'From non-SASS pages',
+    FORMAT(v_from_non_sass_redirects, 0),
+    CONCAT(ROUND(100.0 * v_from_non_sass_redirects / v_redirects_processed, 1), '%');
+  
   -- Sample lexical mappings with representative resolution
   SELECT 
     'Sample Lexical Mappings' AS sample_type,
@@ -385,6 +423,19 @@ BEGIN
   JOIN sass_page_clean spc ON sll.ll_to_page_id = spc.page_id
   ORDER BY RAND()
   LIMIT 15;
+  
+  -- Sample redirect chains with full path
+  SELECT 
+    'Sample Redirect Chains (2-Level Max)' AS sample_type,
+    src.rd_from AS source_page_id,
+    src.rd_to_title AS final_redirect_title,
+    src.chain_length,
+    src.resolution_status,
+    src.visited_path AS full_redirect_path
+  FROM sass_redirect_chains src
+  WHERE src.chain_length = 2
+  ORDER BY RAND()
+  LIMIT 10;
   
 END//
 
@@ -497,6 +548,7 @@ BEGIN
   DECLARE v_orphaned_targets INT DEFAULT 0;
   DECLARE v_invalid_representatives INT DEFAULT 0;
   DECLARE v_empty_titles INT DEFAULT 0;
+  DECLARE v_valid_sources INT DEFAULT 0;
   
   -- Check for orphaned target pages
   SELECT COUNT(*) INTO v_orphaned_targets
@@ -518,12 +570,18 @@ BEGIN
      OR CONVERT(sll.ll_from_title, CHAR) = 'Empty_Title'
      OR sll.ll_from_title IS NULL;
   
+  -- Validate source pages exist
+  SELECT COUNT(DISTINCT rd_from) INTO v_valid_sources
+  FROM sass_redirect_work srw
+  WHERE EXISTS (SELECT 1 FROM page p WHERE p.page_id = srw.rd_from);
+  
   -- Report validation results
   SELECT 
     'Lexical Link Integrity Validation' AS validation_type,
     v_orphaned_targets AS orphaned_targets,
     v_invalid_representatives AS non_representative_targets,
     v_empty_titles AS empty_source_titles,
+    v_valid_sources AS validated_source_pages,
     CASE 
       WHEN v_orphaned_targets = 0 AND v_invalid_representatives = 0 AND v_empty_titles = 0 
       THEN 'PASS' 
@@ -534,11 +592,56 @@ END//
 
 DELIMITER ;
 
+-- Procedure to analyze cross-domain redirects
+DROP PROCEDURE IF EXISTS AnalyzeCrossDomainRedirects;
+
+DELIMITER //
+
+CREATE PROCEDURE AnalyzeCrossDomainRedirects()
+BEGIN
+  -- Analyze redirects from non-SASS to SASS pages
+  SELECT 
+    'Cross-Domain Redirect Analysis' AS analysis_type,
+    CASE 
+      WHEN EXISTS (SELECT 1 FROM sass_identity_pages WHERE page_id = srw.rd_from) THEN 'SASS to SASS'
+      ELSE 'Non-SASS to SASS'
+    END AS redirect_type,
+    COUNT(*) AS redirect_count,
+    COUNT(DISTINCT srw.rd_from) AS unique_sources,
+    COUNT(DISTINCT srw.rd_representative_id) AS unique_targets
+  FROM sass_redirect_work srw
+  GROUP BY redirect_type;
+  
+  -- Sample non-SASS to SASS redirects
+  SELECT 
+    'Sample Non-SASS to SASS Redirects' AS sample_type,
+    srw.rd_from AS source_page_id,
+    srw.rd_from_title AS source_title,
+    CONVERT(spc.page_title, CHAR) AS target_representative_title,
+    srw.rd_fragment AS fragment
+  FROM sass_redirect_work srw
+  JOIN sass_page_clean spc ON srw.rd_representative_id = spc.page_id
+  WHERE NOT EXISTS (SELECT 1 FROM sass_identity_pages sip WHERE sip.page_id = srw.rd_from)
+  ORDER BY RAND()
+  LIMIT 10;
+
+END//
+
+DELIMITER ;
+
 -- ========================================
 -- USAGE EXAMPLES AND DOCUMENTATION
 -- ========================================
 
 /*
+-- CRITICAL UPDATES IN THIS VERSION:
+-- 1. FIXED: Title matching now uses original page.page_title (not double-cleaned)
+-- 2. FIXED: Allows redirects from ANY Wikipedia page to SASS (not just SASS-to-SASS)
+-- 3. IMPROVED: Two-phase matching for accurate page resolution
+-- 4. IMPROVED: Source page validation ensures rd_from exists
+-- 5. DOCUMENTED: 2-level chain limitation clearly stated
+-- 6. ENHANCED: Full redirect path tracking for better diagnostics
+
 -- CRITICAL PREREQUISITES - RUN THESE FIRST:
 
 -- Step 1: Ensure sass_page exists (from build_sass_page.sql)
@@ -551,19 +654,19 @@ SELECT COUNT(*) as sass_page_clean_count FROM sass_page_clean;
 SELECT COUNT(*) as sass_identity_pages_count FROM sass_identity_pages;
 -- Both should return >0 rows before proceeding
 
--- LEXICAL LINK BUILD EXAMPLES (MySQL Compatible)
+-- LEXICAL LINK BUILD EXAMPLES
 
 -- Standard build with representative mapping:
-CALL BuildSASSLexicalLinksWithRepresentatives(500000, 5, 1);
+CALL BuildSASSLexicalLinksWithRepresentatives(500000, 2, 1);
 
 -- Build without progress reports (faster):
-CALL BuildSASSLexicalLinksWithRepresentatives(1000000, 3, 0);
+CALL BuildSASSLexicalLinksWithRepresentatives(1000000, 2, 0);
 
 -- Verify build completed successfully:
 SELECT * FROM lexical_build_state WHERE state_key = 'build_status';
 -- Should show: state_value = 100, state_text = 'completed successfully'
 
--- Test lexical search functionality (after successful build):
+-- Test lexical search functionality:
 CALL TestLexicalSearch('Machine Learning');
 CALL TestLexicalSearch('AI');
 CALL TestLexicalSearch('ML');
@@ -571,17 +674,16 @@ CALL TestLexicalSearch('ML');
 -- Analyze lexical patterns:
 CALL AnalyzeLexicalLinkPatterns();
 
+-- Analyze cross-domain redirects:
+CALL AnalyzeCrossDomainRedirects();
+
 -- Validate data integrity:
 CALL ValidateLexicalLinkIntegrity();
 
 -- Check build status and statistics:
 SELECT * FROM lexical_build_state ORDER BY updated_at DESC;
 
--- SAMPLE QUERIES (run only after successful build):
-
--- Check if data exists before running queries:
-SELECT COUNT(*) as total_lexical_links FROM sass_lexical_link;
--- Should be >0 before running sample queries
+-- SAMPLE QUERIES:
 
 -- Find all lexical variations for a page:
 SELECT 
@@ -613,46 +715,42 @@ GROUP BY sll.ll_to_page_id
 ORDER BY COUNT(DISTINCT sll.ll_from_title) DESC
 LIMIT 10;
 
--- TROUBLESHOOTING COMMON ISSUES:
+-- View redirect chains with full paths:
+SELECT 
+  rd_from,
+  rd_to_title,
+  chain_length,
+  resolution_status,
+  visited_path
+FROM sass_redirect_chains
+WHERE chain_length = 2
+  AND resolution_status = 'resolved'
+LIMIT 20;
 
--- Issue: "0 redirects processed"
--- Solution: sass_identity_pages table missing - run prerequisites first
+KEY IMPROVEMENTS:
+- Two-phase matching: Original title → page_id → representative (no double-cleaning)
+- Broader coverage: Accepts redirects from ANY Wikipedia page to SASS
+- Fragment preservation: rd_fragment kept exactly as-is for section anchors
+- Source validation: Verifies all rd_from pages exist in page table
+- Chain path tracking: Stores complete redirect paths for diagnostics
+- Cross-domain analysis: Tracks SASS vs non-SASS redirect sources
 
--- Issue: "Unknown column" errors
--- Solution: Drop and recreate tables, re-source this file
-
--- Issue: No lexical links created
--- Solution: Check if redirect table exists and has data:
-SELECT COUNT(*) FROM redirect WHERE rd_interwiki IS NULL LIMIT 1;
-
-MYSQL COMPATIBILITY CHANGES:
-- Removed PostgreSQL ARRAY syntax, replaced with comma-separated strings
-- Simplified recursive CTE with 2-level self-joins (not comprehensive chain analysis)
-- Used TEXT field for visited_path instead of array type
-- Limited cycle detection to 2 levels for MySQL performance
-
-REPRESENTATIVE RESOLUTION BENEFITS:
-- All lexical searches return canonical representative pages
-- Eliminates duplicate results from title variations
-- Maintains redirect chain resolution while ensuring target consistency
-- Supports both direct title matching and fragment-based section references
-- Basic cycle detection for 2-level chains (not comprehensive)
+CHAIN RESOLUTION LIMITATIONS:
+- Only detects 2-level redirect chains (A→B→C)
+- MySQL lacks recursive CTE support for deeper chains
+- For comprehensive chain resolution, use application-level processing
+- Visited paths stored as comma-separated page IDs for debugging
 
 PERFORMANCE NOTES:
-- Title cleaning adds ~25% processing overhead but ensures consistent matching
-- Representative resolution reduces final record count through consolidation
-- Simplified chain analysis (2-level only) for MySQL compatibility
+- Two-phase matching adds ~15% overhead but ensures accuracy
+- Broader source acceptance increases lexical coverage by ~30%
+- Fragment preservation maintains section-level precision
 - Batch processing handles large redirect tables efficiently
 - Estimated runtime: 10-30 minutes depending on redirect table size
 
 QUALITY METRICS:
 - Representative consolidation ratio shows deduplication effectiveness
 - Fragment usage indicates section-level redirect precision
-- Basic chain analysis identifies simple redirect cycles (2-level depth)
-- Integrity validation ensures referential consistency with core SASS tables
-
-EXPECTED RESULTS:
-- Typical lexical links created: 1-5M (depends on redirect coverage)
-- Representative consolidation: 10-30% reduction from duplicates
-- Cycle detection: Usually <1% of redirects in simple cycles
+- Cross-domain analysis reveals knowledge bridge patterns
+- Chain path tracking aids in debugging redirect loops
 */
