@@ -93,57 +93,19 @@ CREATE TABLE IF NOT EXISTS sass_filter_patterns (
 ) ENGINE=InnoDB;
 
 -- ========================================
--- FILTERING PATTERN INITIALIZATION
+-- FILTERING FUNCTION
 -- ========================================
 
--- Initialize filtering patterns based on tiered strategy
-INSERT IGNORE INTO sass_filter_patterns (pattern_text, pattern_type, confidence_level, size_threshold, description) VALUES
--- Tier 1: High Confidence (Clear administrative categories)
-('Commons_category', 'contains', 'high', 0, 'Wikimedia Commons category links'),
-('Wikidata', 'contains', 'high', 0, 'Wikidata integration categories'),
-('Hidden_categories', 'contains', 'high', 0, 'Wikipedia hidden category system'),
-('tracking_categories', 'contains', 'high', 0, 'MediaWiki tracking categories'),
-('User_pages', 'contains', 'high', 0, 'User namespace categories'),
-('Wikipedia_administration', 'contains', 'high', 0, 'Wikipedia administrative categories'),
-
--- Tier 2: Medium Confidence (Maintenance patterns with size threshold)
-('articles_needing', 'contains', 'medium', 1000, 'Articles needing cleanup/improvement'),
-('stub_categories', 'contains', 'medium', 500, 'Stub category classifications'),
-('maintenance', 'starts_with', 'medium', 1000, 'Categories starting with maintenance'),
-('cleanup', 'starts_with', 'medium', 1000, 'Categories starting with cleanup'),
-('stubs', 'starts_with', 'medium', 500, 'Categories starting with stubs'),
-
--- Tier 3: Selective (Pattern-based with exceptions)
-('redirects', 'contains', 'low', 2000, 'Redirect-related categories'),
-('templates', 'contains', 'low', 1500, 'Template-related categories'),
-('tracking', 'starts_with', 'low', 1000, 'Categories starting with tracking');
-
--- ========================================
--- INITIALIZATION - Build Root Categories from wiki_top3_levels
--- ========================================
-
--- Extract root categories from wiki_top3_levels and populate sass_roots
-INSERT IGNORE INTO sass_roots (root_id, root_name, page_id)
-SELECT DISTINCT
-  w3l.parent_page_id as root_id,
-  w3l.parent_title as root_name,
-  w3l.parent_page_id as page_id
-FROM wiki_top3_levels w3l
-WHERE w3l.parent_page_id IS NOT NULL
-  AND w3l.parent_title IS NOT NULL;
-
--- ========================================
--- CATEGORY FILTERING FUNCTIONS
--- ========================================
+DROP FUNCTION IF EXISTS should_filter_category;
 
 DELIMITER //
 
--- Function to check if a category should be filtered
-CREATE FUNCTION IF NOT EXISTS should_filter_category(
-  category_title VARCHAR(255),
+CREATE FUNCTION should_filter_category(
+  category_title VARBINARY(255),
   page_length INT,
   page_ns INT
-) RETURNS TINYINT(1)
+)
+RETURNS INT
 READS SQL DATA
 DETERMINISTIC
 BEGIN
@@ -217,7 +179,7 @@ BEGIN
   
   -- Set defaults
   IF p_begin_level IS NULL THEN SET p_begin_level = 0; END IF;
-  IF p_end_level IS NULL THEN SET p_end_level = 12; END IF;
+  IF p_end_level IS NULL THEN SET p_end_level = 10; END IF;
   IF p_enable_filtering IS NULL THEN SET p_enable_filtering = 1; END IF;
 
   SET v_start_time = UNIX_TIMESTAMP();
@@ -288,62 +250,52 @@ BEGIN
     
     SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
     
-    -- Initialize sass_work with level 2 data for recursive expansion
+    -- Initialize sass_work with level 2 data for continuation to level 3+
     INSERT INTO sass_work (page_id, parent_id, root_id, level)
-    SELECT DISTINCT
-      w3l.grandchild_page_id as page_id,
-      w3l.child_page_id as parent_id,
-      w3l.parent_page_id as root_id,
-      2 as level
-    FROM wiki_top3_levels w3l
-    JOIN page p ON w3l.grandchild_page_id = p.page_id
-    WHERE w3l.grandchild_page_id IS NOT NULL
-      AND p.page_content_model = 'wikitext'
-      AND (
-        p_enable_filtering = 0 
-        OR should_filter_category(w3l.grandchild_title, p.page_len, p.page_namespace) = 0
-      );
-    
-    SET v_total_new_pages = v_levels_012_count;
+    SELECT page_id, page_parent_id, page_root_id, 2
+    FROM sass_page
+    WHERE page_dag_level = 2;
     
     -- Progress report for pre-computed levels
     SELECT 
-      'Levels 0-2: Pre-computed from wiki_top3_levels' AS status,
-      FORMAT(v_levels_012_count, 0) AS pages_from_precomputed,
-      FORMAT((SELECT COUNT(*) FROM sass_page WHERE page_dag_level = 0), 0) AS level_0_roots,
-      FORMAT((SELECT COUNT(*) FROM sass_page WHERE page_dag_level = 1), 0) AS level_1_children,
-      FORMAT((SELECT COUNT(*) FROM sass_page WHERE page_dag_level = 2), 0) AS level_2_grandchildren,
+      'Levels 0-2 initialized from wiki_top3_levels' AS status,
+      FORMAT(v_levels_012_count, 0) AS precomputed_pages,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
     
-    -- Start recursive expansion from level 3
+    -- Start recursive processing from level 3
     SET v_current_level = 3;
+    
+  ELSE
+    -- Starting from level > 2, load existing data into sass_work
+    INSERT INTO sass_work (page_id, parent_id, root_id, level)
+    SELECT page_id, page_parent_id, page_root_id, page_dag_level
+    FROM sass_page
+    WHERE page_dag_level = p_begin_level - 1;
+    
+    SET v_current_level = p_begin_level;
   END IF;
   
-  -- Level-by-level traversal with enhanced filtering (starting from level 3 or p_begin_level)
-  WHILE v_current_level <= p_end_level AND v_continue = 1 DO
+  -- Continue building tree recursively from level 3 onwards
+  WHILE v_continue = 1 AND v_current_level <= p_end_level DO
     
-    -- Track current level
-    INSERT INTO build_state (state_key, state_value) 
-    VALUES ('last_attempted_level', v_current_level)
-    ON DUPLICATE KEY UPDATE state_value = v_current_level;
+    -- Get candidates for next level
+    TRUNCATE TABLE sass_work;
     
-    -- Find ALL children with enhanced filtering
-    INSERT IGNORE INTO sass_work (page_id, parent_id, root_id, level)
+    INSERT INTO sass_work (page_id, parent_id, root_id, level)
     SELECT DISTINCT
       cl.cl_from,
-      w.page_id,
+      parent_page.page_id,
       w.root_id,
       v_current_level
-    FROM sass_work w
-    JOIN page parent_page ON w.page_id = parent_page.page_id
+    FROM sass_page parent_page
     JOIN categorylinks cl ON parent_page.page_title = cl.cl_to
     JOIN page p ON cl.cl_from = p.page_id
-    WHERE w.level = v_current_level - 1
+    LEFT JOIN sass_work w ON parent_page.page_id = w.page_id
+    WHERE parent_page.page_dag_level = v_current_level - 1
       AND cl.cl_type IN ('page', 'subcat')
       AND p.page_namespace IN (0, 14)
       AND p.page_content_model = 'wikitext'
       AND NOT EXISTS (SELECT 1 FROM sass_page bp WHERE bp.page_id = cl.cl_from)
-      -- Apply filtering conditions
       AND (
         p_enable_filtering = 0 
         OR should_filter_category(p.page_title, p.page_len, p.page_namespace) = 0
@@ -351,7 +303,7 @@ BEGIN
     
     SET v_rows_added = ROW_COUNT();
     
-    -- Count filtered items for statistics
+    -- Track filtered pages if filtering is enabled
     IF p_enable_filtering = 1 THEN
       SELECT COUNT(*) INTO v_filtered_count
       FROM sass_work w
@@ -495,105 +447,40 @@ BEGIN
   -- For now, call the filtered procedure (future enhancement: implement batching with filtering)
   CALL BuildSASSPageTreeFiltered(p_begin_level, p_end_level, 1);
   
-  SELECT 'Note: Batching with filtering not yet implemented. Used standard filtering.' AS notice;
+  SELECT 'Note: Batching with filtering not yet implemented. Used standard filtering.' AS legacy_note;
 END//
 
 DELIMITER ;
 
 -- ========================================
--- UTILITY PROCEDURES
+-- TESTING AND VALIDATION PROCEDURES
 -- ========================================
 
--- Procedure to test filtering effectiveness
+-- Test filtering effectiveness
 DROP PROCEDURE IF EXISTS TestFilteringEffectiveness;
 
 DELIMITER //
 
 CREATE PROCEDURE TestFilteringEffectiveness()
 BEGIN
-  DECLARE v_total_categories INT;
-  DECLARE v_filtered_categories INT;
-  
-  -- Count total categories in sample
-  SELECT COUNT(*) INTO v_total_categories
-  FROM page p
-  WHERE p.page_namespace = 14 
-    AND p.page_content_model = 'wikitext';
-  
-  -- Count categories that would be filtered
-  SELECT COUNT(*) INTO v_filtered_categories
-  FROM page p
-  WHERE p.page_namespace = 14 
-    AND p.page_content_model = 'wikitext'
-    AND should_filter_category(p.page_title, p.page_len, p.page_namespace) = 1;
-  
-  -- Report filtering effectiveness
   SELECT 
-    'Filtering Effectiveness Test' AS test_name,
-    FORMAT(v_total_categories, 0) AS total_categories,
-    FORMAT(v_filtered_categories, 0) AS would_be_filtered,
-    FORMAT(v_total_categories - v_filtered_categories, 0) AS would_remain,
-    CONCAT(ROUND(100.0 * v_filtered_categories / v_total_categories, 1), '%') AS filter_rate,
-    CONCAT(ROUND(100.0 * (v_total_categories - v_filtered_categories) / v_total_categories, 1), '%') AS retention_rate;
-
-  -- Show sample filtered categories
-  SELECT 
-    'Sample Filtered Categories' AS sample_type,
-    CONVERT(p.page_title, CHAR) AS category_name,
-    p.page_len AS page_length,
-    'Would be filtered' AS status
-  FROM page p
-  WHERE p.page_namespace = 14 
-    AND p.page_content_model = 'wikitext'
-    AND should_filter_category(p.page_title, p.page_len, p.page_namespace) = 1
-  LIMIT 20;
-
-END//
-
-DELIMITER ;
-
--- Procedure to analyze wiki_top3_levels data quality
-DROP PROCEDURE IF EXISTS AnalyzeWikiTop3Levels;
-
-DELIMITER //
-
-CREATE PROCEDURE AnalyzeWikiTop3Levels()
-BEGIN
-  -- Data availability analysis
-  SELECT 
-    'wiki_top3_levels Data Quality Analysis' AS analysis_type,
-    COUNT(*) AS total_rows,
-    COUNT(DISTINCT parent_page_id) AS unique_roots,
-    COUNT(DISTINCT child_page_id) AS unique_level_1,
-    COUNT(DISTINCT grandchild_page_id) AS unique_level_2,
-    COUNT(CASE WHEN parent_page_id IS NULL THEN 1 END) AS null_parents,
-    COUNT(CASE WHEN child_page_id IS NULL THEN 1 END) AS null_children,
-    COUNT(CASE WHEN grandchild_page_id IS NULL THEN 1 END) AS null_grandchildren
-  FROM wiki_top3_levels;
-  
-  -- Root categories preview
-  SELECT 
-    'Root Categories (Level 0)' AS level_type,
-    parent_page_id AS page_id,
-    parent_title AS page_title,
-    COUNT(DISTINCT child_page_id) AS direct_children
-  FROM wiki_top3_levels
-  WHERE parent_page_id IS NOT NULL
-  GROUP BY parent_page_id, parent_title
-  ORDER BY COUNT(DISTINCT child_page_id) DESC
-  LIMIT 10;
-  
-  -- Validation against page table
-  SELECT 
-    'Page Table Validation' AS validation_type,
-    'Parent pages in page table' AS check_type,
-    COUNT(DISTINCT w3l.parent_page_id) AS wiki_top3_count,
-    COUNT(DISTINCT p.page_id) AS page_table_matches,
-    COUNT(DISTINCT CASE WHEN p.page_id IS NULL THEN w3l.parent_page_id END) AS missing_in_page_table
-  FROM wiki_top3_levels w3l
-  LEFT JOIN page p ON w3l.parent_page_id = p.page_id AND p.page_content_model = 'wikitext'
-  WHERE w3l.parent_page_id IS NOT NULL;
-
+    'Filter Pattern Testing' AS test_type,
+    fp.pattern_text,
+    fp.pattern_type,
+    fp.confidence_level,
+    FORMAT(COUNT(DISTINCT p.page_id), 0) AS matching_pages,
+    CONCAT(FORMAT(AVG(p.page_len), 0), ' bytes') AS avg_page_size
+  FROM sass_filter_patterns fp
+  CROSS JOIN page p
+  WHERE fp.is_active = 1
+    AND p.page_namespace = 14
+    AND (
+      (fp.pattern_type = 'contains' AND LOWER(CONVERT(p.page_title, CHAR)) LIKE CONCAT('%', LOWER(fp.pattern_text), '%'))
+      OR (fp.pattern_type = 'starts_with' AND LOWER(CONVERT(p.page_title, CHAR)) LIKE CONCAT(LOWER(fp.pattern_text), '%'))
+      OR (fp.pattern_type = 'exact' AND LOWER(CONVERT(p.page_title, CHAR)) = LOWER(fp.pattern_text))
+    )
+  GROUP BY fp.pattern_id, fp.pattern_text, fp.pattern_type, fp.confidence_level
+  ORDER BY fp.confidence_level, COUNT(DISTINCT p.page_id) DESC;
 END//
 
 DELIMITER ;
@@ -603,22 +490,24 @@ DELIMITER ;
 -- ========================================
 
 /*
--- ENHANCED USAGE EXAMPLES WITH wiki_top3_levels INTEGRATION
+-- PRE-REQUISITES:
+-- 1. Ensure wiki_top3_levels table exists (from build_wiki_top3_levels.sql)
+-- 2. Load filter patterns if using filtering (see sass_filter_patterns table)
 
--- Analyze source data first:
-CALL AnalyzeWikiTop3Levels();
+-- Initialize default filter patterns (optional)
+CALL InitializeDefaultFilterPatterns();
 
 -- Standard build with pre-computed 3-level hierarchy:
-CALL BuildSASSPageTreeFiltered(0, 12, 1);
+CALL BuildSASSPageTreeFiltered(0, 10, 1);
 
 -- Build without filtering (for comparison):
-CALL BuildSASSPageTreeFiltered(0, 12, 0);
+CALL BuildSASSPageTreeFiltered(0, 10, 0);
 
 -- Start from level 3 (assuming levels 0-2 already built):
-CALL BuildSASSPageTreeFiltered(3, 12, 1);
+CALL BuildSASSPageTreeFiltered(3, 10, 1);
 
 -- Legacy compatibility (filtering enabled by default):
-CALL BuildSASSPageTreeSimple(0, 12);
+CALL BuildSASSPageTreeSimple(0, 10);
 
 -- Test filtering effectiveness:
 CALL TestFilteringEffectiveness();
