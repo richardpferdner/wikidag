@@ -272,7 +272,7 @@ BEGIN
     -- Export chunks
     SET range_start = min_id;
     
-    WHILE range_start <= max_id DO
+    chunk_loop: WHILE range_start <= max_id DO
         SET range_end = range_start + chunk_size - 1;
         SET chunk_start_time = NOW();
         
@@ -346,7 +346,7 @@ BEGIN
         
         -- Exit if no more data
         IF chunk_rows = 0 THEN
-            LEAVE;
+            LEAVE chunk_loop;
         END IF;
     END WHILE;
     
