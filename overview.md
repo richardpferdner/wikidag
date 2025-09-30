@@ -321,8 +321,8 @@ CREATE INDEX idx_leaf ON sass_page_clean(page_is_leaf);
 
 ## Key Design Decisions
 
-1. **Level Limit:** Stops at level 10 (not deeper) to balance coverage vs. noise
-2. **Hierarchy Preservation:** Levels 0-2 pages always become representatives (maintains original structure)
+1. **Level Limit:** Stops at level 7 (not deeper) to balance coverage vs. noise
+2. **Hierarchy Preservation:** Levels 0 pages always become representatives (maintains original structure)
 3. **Deduplication Strategy:** One representative per unique cleaned title (reduces 9.4M → 2.1M)
 4. **Weak Branch Filtering:** Categories with <5 children converted to leaves (2.1M → 1.85M)
 5. **No Self-References:** All self-reference loops removed during orphan repair
