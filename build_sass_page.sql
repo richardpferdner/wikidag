@@ -214,7 +214,7 @@ BEGIN
     TRUNCATE TABLE sass_work_temp;
     
     -- Get candidates for next level
-    INSERT INTO sass_work_temp (page_id, parent_id, root_id, level)
+    INSERT IGNORE INTO sass_work_temp (page_id, parent_id, root_id, level)
     SELECT DISTINCT
       cl.cl_from,
       parent_page.page_id,
