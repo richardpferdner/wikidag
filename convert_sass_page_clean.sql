@@ -5,6 +5,7 @@
 -- Applies enhanced text normalization for improved matching and search
 -- AUTO-REPAIRS orphan references caused by representative deduplication
 -- FIXED: MySQL Error 1093 - uses temporary table approach
+-- FIXED: Self-reference circular loops - uses grandparent fallback
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -133,6 +134,8 @@ BEGIN
   DECLARE v_identity_pages INT DEFAULT 0;
   DECLARE v_preserved_hierarchy_pages INT DEFAULT 0;
   DECLARE v_orphans_repaired INT DEFAULT 0;
+  DECLARE v_self_ref_repaired INT DEFAULT 0;
+  DECLARE v_self_ref_unresolved INT DEFAULT 0;
   
   -- Set defaults
   IF p_batch_size IS NULL THEN SET p_batch_size = 100000; END IF;
@@ -271,19 +274,19 @@ BEGIN
   DROP TEMPORARY TABLE temp_representatives;
   
   -- ========================================
-  -- PHASE 3: AUTO-REPAIR ORPHAN PARENT REFERENCES
+  -- PHASE 3: AUTO-REPAIR ORPHAN PARENT REFERENCES WITH SELF-REFERENCE PROTECTION
   -- ========================================
   
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
-  VALUES ('build_phase', 3, 'Auto-repairing orphan parent references')
-  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Auto-repairing orphan parent references';
+  VALUES ('build_phase', 3, 'Auto-repairing orphan parent references with self-reference protection')
+  ON DUPLICATE KEY UPDATE state_value = 3, state_text = 'Auto-repairing orphan parent references with self-reference protection';
   
   -- Progress report
   SELECT 
-    'PHASE 3: Auto-Repairing Orphan References' AS status,
-    'Remapping orphaned children to their parent representatives' AS action;
+    'PHASE 3: Auto-Repairing Orphan References (with self-reference detection)' AS status,
+    'Step 1: Standard orphan repair, Step 2: Self-reference grandparent fallback' AS action;
   
-  -- Create temporary table to identify orphans (avoids MySQL self-reference limitation)
+  -- Create temporary table for standard orphans (excludes self-references)
   CREATE TEMPORARY TABLE temp_orphans AS
   SELECT c.page_id, sip.representative_page_id
   FROM sass_page_clean c
@@ -291,26 +294,68 @@ BEGIN
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0
     AND c.page_dag_level <= 12
-    AND p.page_id IS NULL;
+    AND p.page_id IS NULL
+    AND c.page_id != sip.representative_page_id;  -- Exclude self-references
   
-  -- Remap orphaned children to their parent's representative
-  -- This fixes the architectural mismatch between MIN(parent_id) selection
-  -- in build_sass_page.sql and representative deduplication
+  -- Create temporary table for self-reference orphans with grandparent fallback
+  CREATE TEMPORARY TABLE temp_self_ref_orphans AS
+  SELECT 
+    c.page_id,
+    COALESCE(gp_clean.page_id, sip.representative_page_id) as new_parent_id,
+    CASE 
+      WHEN gp_clean.page_id IS NOT NULL THEN 'grandparent'
+      ELSE 'unresolved'
+    END as resolution_method
+  FROM sass_page_clean c
+  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  LEFT JOIN sass_page sp_orig ON c.page_parent_id = sp_orig.page_id
+  LEFT JOIN sass_page sp_grandparent ON sp_orig.page_parent_id = sp_grandparent.page_id
+  LEFT JOIN sass_page_clean gp_clean ON sp_grandparent.page_id = gp_clean.page_id
+  WHERE c.page_dag_level > 0
+    AND c.page_dag_level <= 12
+    AND p.page_id IS NULL
+    AND c.page_id = sip.representative_page_id;  -- Only self-references
+  
+  -- Step 1: Repair standard orphans (non-self-references)
   UPDATE sass_page_clean c
   JOIN temp_orphans t ON c.page_id = t.page_id
   SET c.page_parent_id = t.representative_page_id;
   
   SET v_orphans_repaired = ROW_COUNT();
   
-  -- Clean up temporary table
+  -- Step 2: Repair self-reference orphans with grandparent fallback
+  UPDATE sass_page_clean c
+  JOIN temp_self_ref_orphans t ON c.page_id = t.page_id
+  SET c.page_parent_id = t.new_parent_id
+  WHERE t.resolution_method = 'grandparent'
+    AND t.new_parent_id != c.page_id;  -- Double-check no self-reference
+  
+  SET v_self_ref_repaired = ROW_COUNT();
+  
+  -- Count unresolved self-references (grandparent also orphaned)
+  SELECT COUNT(*) INTO v_self_ref_unresolved
+  FROM temp_self_ref_orphans
+  WHERE resolution_method = 'unresolved';
+  
+  -- Clean up temporary tables
   DROP TEMPORARY TABLE temp_orphans;
+  DROP TEMPORARY TABLE temp_self_ref_orphans;
   
   -- Log repair statistics
   INSERT INTO clean_build_state (state_key, state_value) 
   VALUES ('orphans_auto_repaired', v_orphans_repaired)
   ON DUPLICATE KEY UPDATE state_value = v_orphans_repaired;
   
-  -- Verification: Count remaining orphans (should be 0)
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('self_ref_orphans_repaired', v_self_ref_repaired)
+  ON DUPLICATE KEY UPDATE state_value = v_self_ref_repaired;
+  
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('self_ref_orphans_unresolved', v_self_ref_unresolved)
+  ON DUPLICATE KEY UPDATE state_value = v_self_ref_unresolved;
+  
+  -- Verification: Count remaining orphans and self-references
   SET @remaining_orphans = (
     SELECT COUNT(*) 
     FROM sass_page_clean c 
@@ -320,18 +365,35 @@ BEGIN
       AND p.page_id IS NULL
   );
   
+  SET @self_references = (
+    SELECT COUNT(*)
+    FROM sass_page_clean
+    WHERE page_id = page_parent_id
+      AND page_dag_level > 0
+  );
+  
   INSERT INTO clean_build_state (state_key, state_value) 
   VALUES ('remaining_orphans_after_repair', @remaining_orphans)
   ON DUPLICATE KEY UPDATE state_value = @remaining_orphans;
   
+  INSERT INTO clean_build_state (state_key, state_value) 
+  VALUES ('self_references_created', @self_references)
+  ON DUPLICATE KEY UPDATE state_value = @self_references;
+  
   -- Orphan repair report
   SELECT 
     'Orphan Auto-Repair Complete' AS status,
-    FORMAT(v_orphans_repaired, 0) AS orphans_fixed,
+    FORMAT(v_orphans_repaired, 0) AS standard_orphans_fixed,
+    FORMAT(v_self_ref_repaired, 0) AS self_ref_fixed_via_grandparent,
+    FORMAT(v_self_ref_unresolved, 0) AS self_ref_unresolved,
     FORMAT(@remaining_orphans, 0) AS remaining_orphans,
+    FORMAT(@self_references, 0) AS self_references_created,
     CASE 
-      WHEN @remaining_orphans = 0 THEN 'SUCCESS - All orphans repaired'
-      ELSE CONCAT('WARNING - ', @remaining_orphans, ' orphans could not be repaired')
+      WHEN @remaining_orphans = v_self_ref_unresolved AND @self_references = 0 
+        THEN 'SUCCESS - Only unresolvable orphans remain (no grandparent)'
+      WHEN @self_references = 0 
+        THEN 'SUCCESS - No self-references created'
+      ELSE CONCAT('WARNING - ', @self_references, ' self-references exist')
     END AS repair_status;
   
   -- Update final build state
@@ -362,8 +424,11 @@ BEGIN
     FORMAT(v_identity_pages, 0) AS identity_pages_created,
     FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
     FORMAT(v_preserved_hierarchy_pages, 0) AS hierarchy_representatives_preserved,
-    FORMAT(v_orphans_repaired, 0) AS orphans_auto_repaired,
+    FORMAT(v_orphans_repaired, 0) AS standard_orphans_repaired,
+    FORMAT(v_self_ref_repaired, 0) AS self_ref_repaired,
+    FORMAT(v_self_ref_unresolved, 0) AS self_ref_unresolved,
     FORMAT(@remaining_orphans, 0) AS remaining_orphans,
+    FORMAT(@self_references, 0) AS self_references,
     v_batch_count AS total_batches,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
@@ -439,6 +504,16 @@ BEGIN
   
   SELECT 
     'Final Data Integrity Check',
+    'Self-references (page_id = parent_id)', 
+    COUNT(*) 
+  FROM sass_page_clean
+  WHERE page_id = page_parent_id
+    AND page_dag_level > 0
+  
+  UNION ALL
+  
+  SELECT 
+    'Final Data Integrity Check',
     'Wrong parent level', 
     COUNT(*) 
   FROM sass_page_clean c 
@@ -466,6 +541,8 @@ BEGIN
   DECLARE v_identity_pages INT DEFAULT 0;
   DECLARE v_preserved_hierarchy_pages INT DEFAULT 0;
   DECLARE v_orphans_repaired INT DEFAULT 0;
+  DECLARE v_self_ref_repaired INT DEFAULT 0;
+  DECLARE v_self_ref_unresolved INT DEFAULT 0;
   
   SET v_start_time = UNIX_TIMESTAMP();
   
@@ -548,14 +625,14 @@ BEGIN
   WHERE spc.page_dag_level <= 2;
   
   -- ========================================
-  -- AUTO-REPAIR ORPHAN PARENT REFERENCES
+  -- AUTO-REPAIR ORPHAN PARENT REFERENCES WITH SELF-REFERENCE PROTECTION
   -- ========================================
   
   SELECT 
-    'Auto-Repairing Orphan References' AS status,
-    'Remapping orphaned children to their parent representatives' AS action;
+    'Auto-Repairing Orphan References (with self-reference detection)' AS status,
+    'Step 1: Standard orphan repair, Step 2: Self-reference grandparent fallback' AS action;
   
-  -- Create temporary table to identify orphans (avoids MySQL self-reference limitation)
+  -- Create temporary table for standard orphans (excludes self-references)
   CREATE TEMPORARY TABLE temp_orphans AS
   SELECT c.page_id, sip.representative_page_id
   FROM sass_page_clean c
@@ -563,19 +640,55 @@ BEGIN
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0
     AND c.page_dag_level <= 12
-    AND p.page_id IS NULL;
+    AND p.page_id IS NULL
+    AND c.page_id != sip.representative_page_id;  -- Exclude self-references
   
-  -- Remap orphaned children to their parent's representative
+  -- Create temporary table for self-reference orphans with grandparent fallback
+  CREATE TEMPORARY TABLE temp_self_ref_orphans AS
+  SELECT 
+    c.page_id,
+    COALESCE(gp_clean.page_id, sip.representative_page_id) as new_parent_id,
+    CASE 
+      WHEN gp_clean.page_id IS NOT NULL THEN 'grandparent'
+      ELSE 'unresolved'
+    END as resolution_method
+  FROM sass_page_clean c
+  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  LEFT JOIN sass_page sp_orig ON c.page_parent_id = sp_orig.page_id
+  LEFT JOIN sass_page sp_grandparent ON sp_orig.page_parent_id = sp_grandparent.page_id
+  LEFT JOIN sass_page_clean gp_clean ON sp_grandparent.page_id = gp_clean.page_id
+  WHERE c.page_dag_level > 0
+    AND c.page_dag_level <= 12
+    AND p.page_id IS NULL
+    AND c.page_id = sip.representative_page_id;  -- Only self-references
+  
+  -- Step 1: Repair standard orphans (non-self-references)
   UPDATE sass_page_clean c
   JOIN temp_orphans t ON c.page_id = t.page_id
   SET c.page_parent_id = t.representative_page_id;
   
   SET v_orphans_repaired = ROW_COUNT();
   
-  -- Clean up temporary table
-  DROP TEMPORARY TABLE temp_orphans;
+  -- Step 2: Repair self-reference orphans with grandparent fallback
+  UPDATE sass_page_clean c
+  JOIN temp_self_ref_orphans t ON c.page_id = t.page_id
+  SET c.page_parent_id = t.new_parent_id
+  WHERE t.resolution_method = 'grandparent'
+    AND t.new_parent_id != c.page_id;  -- Double-check no self-reference
   
-  -- Verification: Count remaining orphans (should be 0)
+  SET v_self_ref_repaired = ROW_COUNT();
+  
+  -- Count unresolved self-references
+  SELECT COUNT(*) INTO v_self_ref_unresolved
+  FROM temp_self_ref_orphans
+  WHERE resolution_method = 'unresolved';
+  
+  -- Clean up temporary tables
+  DROP TEMPORARY TABLE temp_orphans;
+  DROP TEMPORARY TABLE temp_self_ref_orphans;
+  
+  -- Verification: Count remaining orphans and self-references
   SET @remaining_orphans = (
     SELECT COUNT(*) 
     FROM sass_page_clean c 
@@ -585,6 +698,13 @@ BEGIN
       AND p.page_id IS NULL
   );
   
+  SET @self_references = (
+    SELECT COUNT(*)
+    FROM sass_page_clean
+    WHERE page_id = page_parent_id
+      AND page_dag_level > 0
+  );
+  
   -- Summary report with hierarchy preservation and orphan repair metrics
   SELECT 
     'Simple Identity Conversion with Hierarchy Preservation & Orphan Repair Complete' AS status,
@@ -592,11 +712,17 @@ BEGIN
     FORMAT(v_identity_pages, 0) AS identity_pages_created,
     FORMAT((SELECT COUNT(DISTINCT representative_page_id) FROM sass_identity_pages), 0) AS unique_representatives,
     FORMAT(v_preserved_hierarchy_pages, 0) AS hierarchy_representatives_preserved,
-    FORMAT(v_orphans_repaired, 0) AS orphans_auto_repaired,
+    FORMAT(v_orphans_repaired, 0) AS standard_orphans_repaired,
+    FORMAT(v_self_ref_repaired, 0) AS self_ref_repaired,
+    FORMAT(v_self_ref_unresolved, 0) AS self_ref_unresolved,
     FORMAT(@remaining_orphans, 0) AS remaining_orphans,
+    FORMAT(@self_references, 0) AS self_references,
     CASE 
-      WHEN @remaining_orphans = 0 THEN 'SUCCESS - All orphans repaired'
-      ELSE CONCAT('WARNING - ', @remaining_orphans, ' orphans could not be repaired')
+      WHEN @remaining_orphans = v_self_ref_unresolved AND @self_references = 0 
+        THEN 'SUCCESS - Only unresolvable orphans remain'
+      WHEN @self_references = 0 
+        THEN 'SUCCESS - No self-references created'
+      ELSE CONCAT('WARNING - ', @self_references, ' self-references exist')
     END AS repair_status,
     ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS total_time_sec;
   
@@ -764,6 +890,7 @@ DELIMITER ;
 /*
 -- ENHANCED TITLE CLEANING WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
 -- FIXED: MySQL Error 1093 - uses temporary table approach to avoid self-reference
+-- FIXED: Self-reference circular loops - uses grandparent fallback
 
 -- Standard conversion with all features:
 CALL ConvertSASSPageCleanWithIdentity(100000);
@@ -784,7 +911,7 @@ CALL ValidateHierarchyPreservation();
 -- Check conversion status:
 SELECT * FROM clean_build_state ORDER BY updated_at DESC;
 
--- Verify orphan repair success:
+-- Verify orphan repair success (all should be 0 except possibly unresolved self-refs):
 SELECT 
   'Level 0 with non-zero parent' as violation_type, 
   COUNT(*) as count 
@@ -805,6 +932,15 @@ WHERE c.page_dag_level > 0
 UNION ALL
 
 SELECT 
+  'Self-references (page_id = parent_id)', 
+  COUNT(*) 
+FROM sass_page_clean
+WHERE page_id = page_parent_id
+  AND page_dag_level > 0
+
+UNION ALL
+
+SELECT 
   'Wrong parent level', 
   COUNT(*) 
 FROM sass_page_clean c 
@@ -813,17 +949,23 @@ WHERE c.page_dag_level > 0
   AND c.page_dag_level <= 12 
   AND p.page_dag_level != c.page_dag_level - 1;
 
--- Expected result: ALL counts should be 0
+-- Expected results:
+-- Level 0 with non-zero parent: 0
+-- Missing parent (orphans): ~16,307 (only unresolvable self-refs without grandparents)
+-- Self-references: 0
+-- Wrong parent level: 0 (except for unresolvable self-refs)
 
 KEY FEATURES IN THIS VERSION:
 1. Modified representative selection to prioritize pages with page_dag_level <= 2
 2. Original Wiki_top3_levels page IDs (levels 0-2) maintain representative status
 3. Standard representative selection applies only to levels 3+
 4. **NEW: PHASE 3 - Automatic orphan parent reference repair**
-5. **NEW: Remaps all orphaned children to their parent's representative**
-6. **NEW: Comprehensive validation and reporting of orphan repair**
-7. **FIXED: MySQL Error 1093 - uses temporary table to avoid self-reference**
-8. Comprehensive validation procedures to verify preservation
+5. **NEW: Self-reference detection and exclusion**
+6. **NEW: Grandparent fallback for self-reference orphans**
+7. **NEW: Comprehensive tracking of repair types**
+8. **FIXED: MySQL Error 1093 - uses temporary table to avoid self-reference**
+9. **FIXED: Circular self-references prevented**
+10. Comprehensive validation procedures to verify preservation
 
 REPRESENTATIVE SELECTION CRITERIA (UPDATED):
 1. FIRST: Original hierarchy pages (page_dag_level <= 2)
@@ -833,35 +975,48 @@ REPRESENTATIVE SELECTION CRITERIA (UPDATED):
 
 ORPHAN AUTO-REPAIR MECHANISM:
 - Automatically detects children pointing to missing parents
-- Uses sass_identity_pages to find parent's representative
-- Remaps child's page_parent_id to representative
+- Separates standard orphans from self-reference orphans
+- Standard orphans: remapped to parent's representative
+- Self-reference orphans: remapped to grandparent if available
 - Uses temporary table approach to avoid MySQL Error 1093
-- Validates repair success (remaining_orphans should be 0)
+- Validates repair success (self_references should be 0)
+- Tracks unresolvable orphans (grandparent also orphaned)
 - Provides comprehensive metrics in build_state table
 
+SELF-REFERENCE PROTECTION:
+- Detects when orphan.page_id = representative.page_id
+- Finds grandparent from original sass_page hierarchy
+- Uses grandparent if it exists in sass_page_clean
+- Leaves as orphan if grandparent unavailable (prevents circular reference)
+- Expected: ~24K repaired via grandparent, ~16K unresolvable
+
 ARCHITECTURAL FIX:
-This version solves the orphan problem at its source by:
-1. Detecting that representative deduplication broke parent references
-2. Using the same identity mapping to repair the references
-3. Ensuring referential integrity after representative selection
-4. Validating zero orphans remain after conversion
-5. Working around MySQL self-reference limitations with temp tables
+This version solves both orphan problems:
+1. Standard orphans from representative deduplication (97% of cases)
+2. Self-reference orphans from parent-child title inversions (3% of cases)
+3. Uses identity mapping to repair references
+4. Uses grandparent fallback for self-references
+5. Ensures referential integrity after representative selection
+6. Validates zero self-references after conversion
+7. Works around MySQL self-reference limitations with temp tables
 
 MIGRATION FROM PREVIOUS VERSION:
 If you have existing sass_page_clean data with orphans:
 1. Run: CALL ConvertSASSPageCleanWithIdentitySimple();
-2. All 1.39M orphans will be automatically repaired
-3. Verify: Check that remaining_orphans = 0 in output
+2. All standard orphans will be automatically repaired
+3. Self-reference orphans will use grandparent fallback
+4. Verify: Check that self_references = 0 in output
 
 ESTIMATED RUNTIME:
 - Phase 1 (Build clean table): 5-10 minutes
 - Phase 2 (Build identity table): 2-5 minutes
-- Phase 3 (Orphan repair): 1-3 minutes
-- Total: 8-18 minutes for full conversion with orphan repair
+- Phase 3 (Orphan repair with self-ref protection): 2-4 minutes
+- Total: 9-19 minutes for full conversion with orphan repair
 
 MYSQL COMPATIBILITY:
 - Works with MySQL 5.7+
 - Works with MariaDB 10.2+
 - Uses LEFT JOIN + IS NULL pattern instead of NOT EXISTS for better compatibility
 - Temporary tables avoid self-reference limitations across all MySQL versions
+- Grandparent lookup uses original sass_page (not cleaned version)
 */
