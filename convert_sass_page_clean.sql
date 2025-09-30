@@ -4,6 +4,7 @@
 -- PRESERVES original Wiki_top3_levels page IDs for levels 0-2
 -- Applies enhanced text normalization for improved matching and search
 -- AUTO-REPAIRS orphan references caused by representative deduplication
+-- FIXED: MySQL Error 1093 - uses temporary table approach
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -282,19 +283,27 @@ BEGIN
     'PHASE 3: Auto-Repairing Orphan References' AS status,
     'Remapping orphaned children to their parent representatives' AS action;
   
+  -- Create temporary table to identify orphans (avoids MySQL self-reference limitation)
+  CREATE TEMPORARY TABLE temp_orphans AS
+  SELECT c.page_id, sip.representative_page_id
+  FROM sass_page_clean c
+  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_dag_level > 0
+    AND c.page_dag_level <= 12
+    AND p.page_id IS NULL;
+  
   -- Remap orphaned children to their parent's representative
   -- This fixes the architectural mismatch between MIN(parent_id) selection
   -- in build_sass_page.sql and representative deduplication
   UPDATE sass_page_clean c
-  JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
-  SET c.page_parent_id = sip.representative_page_id
-  WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 12
-    AND NOT EXISTS (
-      SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
-    );
+  JOIN temp_orphans t ON c.page_id = t.page_id
+  SET c.page_parent_id = t.representative_page_id;
   
   SET v_orphans_repaired = ROW_COUNT();
+  
+  -- Clean up temporary table
+  DROP TEMPORARY TABLE temp_orphans;
   
   -- Log repair statistics
   INSERT INTO clean_build_state (state_key, state_value) 
@@ -305,11 +314,10 @@ BEGIN
   SET @remaining_orphans = (
     SELECT COUNT(*) 
     FROM sass_page_clean c 
+    LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
     WHERE c.page_dag_level > 0 
       AND c.page_dag_level <= 12
-      AND NOT EXISTS (
-        SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
-      )
+      AND p.page_id IS NULL
   );
   
   INSERT INTO clean_build_state (state_key, state_value) 
@@ -422,11 +430,10 @@ BEGIN
     'Missing parent (orphans)', 
     COUNT(*) 
   FROM sass_page_clean c 
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0 
     AND c.page_dag_level <= 12 
-    AND NOT EXISTS (
-      SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
-    )
+    AND p.page_id IS NULL
   
   UNION ALL
   
@@ -548,27 +555,34 @@ BEGIN
     'Auto-Repairing Orphan References' AS status,
     'Remapping orphaned children to their parent representatives' AS action;
   
-  -- Remap orphaned children to their parent's representative
-  UPDATE sass_page_clean c
+  -- Create temporary table to identify orphans (avoids MySQL self-reference limitation)
+  CREATE TEMPORARY TABLE temp_orphans AS
+  SELECT c.page_id, sip.representative_page_id
+  FROM sass_page_clean c
   JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
-  SET c.page_parent_id = sip.representative_page_id
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0
     AND c.page_dag_level <= 12
-    AND NOT EXISTS (
-      SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
-    );
+    AND p.page_id IS NULL;
+  
+  -- Remap orphaned children to their parent's representative
+  UPDATE sass_page_clean c
+  JOIN temp_orphans t ON c.page_id = t.page_id
+  SET c.page_parent_id = t.representative_page_id;
   
   SET v_orphans_repaired = ROW_COUNT();
+  
+  -- Clean up temporary table
+  DROP TEMPORARY TABLE temp_orphans;
   
   -- Verification: Count remaining orphans (should be 0)
   SET @remaining_orphans = (
     SELECT COUNT(*) 
     FROM sass_page_clean c 
+    LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
     WHERE c.page_dag_level > 0 
       AND c.page_dag_level <= 12
-      AND NOT EXISTS (
-        SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
-      )
+      AND p.page_id IS NULL
   );
   
   -- Summary report with hierarchy preservation and orphan repair metrics
@@ -749,6 +763,7 @@ DELIMITER ;
 
 /*
 -- ENHANCED TITLE CLEANING WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
+-- FIXED: MySQL Error 1093 - uses temporary table approach to avoid self-reference
 
 -- Standard conversion with all features:
 CALL ConvertSASSPageCleanWithIdentity(100000);
@@ -782,11 +797,10 @@ SELECT
   'Missing parent (orphans)', 
   COUNT(*) 
 FROM sass_page_clean c 
+LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
 WHERE c.page_dag_level > 0 
   AND c.page_dag_level <= 12 
-  AND NOT EXISTS (
-    SELECT 1 FROM sass_page_clean p WHERE p.page_id = c.page_parent_id
-  )
+  AND p.page_id IS NULL
 
 UNION ALL
 
@@ -808,7 +822,8 @@ KEY FEATURES IN THIS VERSION:
 4. **NEW: PHASE 3 - Automatic orphan parent reference repair**
 5. **NEW: Remaps all orphaned children to their parent's representative**
 6. **NEW: Comprehensive validation and reporting of orphan repair**
-7. Comprehensive validation procedures to verify preservation
+7. **FIXED: MySQL Error 1093 - uses temporary table to avoid self-reference**
+8. Comprehensive validation procedures to verify preservation
 
 REPRESENTATIVE SELECTION CRITERIA (UPDATED):
 1. FIRST: Original hierarchy pages (page_dag_level <= 2)
@@ -820,6 +835,7 @@ ORPHAN AUTO-REPAIR MECHANISM:
 - Automatically detects children pointing to missing parents
 - Uses sass_identity_pages to find parent's representative
 - Remaps child's page_parent_id to representative
+- Uses temporary table approach to avoid MySQL Error 1093
 - Validates repair success (remaining_orphans should be 0)
 - Provides comprehensive metrics in build_state table
 
@@ -829,6 +845,7 @@ This version solves the orphan problem at its source by:
 2. Using the same identity mapping to repair the references
 3. Ensuring referential integrity after representative selection
 4. Validating zero orphans remain after conversion
+5. Working around MySQL self-reference limitations with temp tables
 
 MIGRATION FROM PREVIOUS VERSION:
 If you have existing sass_page_clean data with orphans:
@@ -841,4 +858,10 @@ ESTIMATED RUNTIME:
 - Phase 2 (Build identity table): 2-5 minutes
 - Phase 3 (Orphan repair): 1-3 minutes
 - Total: 8-18 minutes for full conversion with orphan repair
+
+MYSQL COMPATIBILITY:
+- Works with MySQL 5.7+
+- Works with MariaDB 10.2+
+- Uses LEFT JOIN + IS NULL pattern instead of NOT EXISTS for better compatibility
+- Temporary tables avoid self-reference limitations across all MySQL versions
 */
