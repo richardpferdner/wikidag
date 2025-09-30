@@ -473,6 +473,10 @@ END$$
 DELIMITER ;
 
 -- Usage examples
+-- mysql_export % rm -rf /private/tmp/mysql_export/*.csv
+-- scripts-data-stack-postgres % docker exec -i safe-ai-data-postgres psql -U postgres -d mydb -c "TRUNCATE TABLE sass_page_clean, sass_page_clean_staging;"
+
+-- mysql> 
 -- CALL DiagnoseExportEnvironment();
 -- CALL DiagnoseFileSystemIssues('/private/tmp/mysql_export/');
 -- CALL ExportSASSPageCleanSecure(1.0, 100);
