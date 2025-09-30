@@ -168,12 +168,12 @@ BEGIN
   
   TRUNCATE TABLE sass_work_temp;
   
-  -- Initialize with pre-computed 3-level hierarchy
-  IF p_begin_level <= 2 THEN
+  -- Initialize with level 0 only from wiki_top3_levels
+  IF p_begin_level = 0 THEN
     
-    SELECT 'Building Levels 0-2 from wiki_top3_levels' AS status;
+    SELECT 'Building Level 0 from wiki_top3_levels' AS status;
     
-    -- Level 0: Root categories
+    -- Level 0: Root categories only
     INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
     SELECT DISTINCT
       w3l.parent_page_id,
@@ -187,58 +187,18 @@ BEGIN
     WHERE w3l.parent_page_id IS NOT NULL
       AND p.page_content_model = 'wikitext';
     
-    SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
-    
-    -- Level 1: Children
-    INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
-    SELECT DISTINCT
-      w3l.child_page_id,
-      w3l.child_title,
-      w3l.parent_page_id,
-      w3l.parent_page_id,
-      1,
-      CASE WHEN p.page_namespace = 0 THEN 1 ELSE 0 END
-    FROM wiki_top3_levels w3l
-    JOIN page p ON w3l.child_page_id = p.page_id
-    WHERE w3l.child_page_id IS NOT NULL
-      AND p.page_content_model = 'wikitext'
-      AND (p_enable_filtering = 0 OR should_filter_category(w3l.child_title, p.page_len, p.page_namespace) = 0);
-    
-    SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
-    
-    -- Level 2: Grandchildren
-    INSERT IGNORE INTO sass_page (page_id, page_title, page_parent_id, page_root_id, page_dag_level, page_is_leaf)
-    SELECT DISTINCT
-      w3l.grandchild_page_id,
-      w3l.grandchild_title,
-      w3l.child_page_id,
-      w3l.parent_page_id,
-      2,
-      CASE WHEN p.page_namespace = 0 THEN 1 ELSE 0 END
-    FROM wiki_top3_levels w3l
-    JOIN page p ON w3l.grandchild_page_id = p.page_id
-    WHERE w3l.grandchild_page_id IS NOT NULL
-      AND p.page_content_model = 'wikitext'
-      AND (p_enable_filtering = 0 OR should_filter_category(w3l.grandchild_title, p.page_len, p.page_namespace) = 0);
-    
-    SET v_levels_012_count = v_levels_012_count + ROW_COUNT();
-    
-    -- Initialize working table with level 2
-    INSERT INTO sass_work_temp (page_id, parent_id, root_id, level)
-    SELECT page_id, page_parent_id, page_root_id, 2
-    FROM sass_page
-    WHERE page_dag_level = 2;
+    SET v_levels_012_count = ROW_COUNT();
     
     -- Progress report
     SELECT 
-      'Levels 0-2 Complete' AS status,
-      FORMAT(v_levels_012_count, 0) AS precomputed_pages,
+      'Level 0 Complete' AS status,
+      FORMAT(v_levels_012_count, 0) AS root_categories,
       ROUND(UNIX_TIMESTAMP() - v_start_time, 2) AS elapsed_sec;
     
-    SET v_current_level = 3;
+    SET v_current_level = 1;
     
   ELSE
-    -- Starting beyond level 2
+    -- Starting beyond level 0
     INSERT INTO sass_work_temp (page_id, parent_id, root_id, level)
     SELECT page_id, page_parent_id, page_root_id, page_dag_level
     FROM sass_page
@@ -370,11 +330,7 @@ DELIMITER ;
 -- ========================================
 
 /*
--- Drop existing data
-DROP TABLE IF EXISTS sass_identity_pages;DROP TABLE IF EXISTS sass_page_clean;DROP TABLE IF EXISTS sass_page;DROP TABLE IF EXISTS sass_cycles;
-
 -- Standard build with filtering (levels 0-10)
-source build_sass_page.sql;
 CALL BuildSASSPageTreeFiltered(0, 10, 1);
 
 -- Build without filtering
