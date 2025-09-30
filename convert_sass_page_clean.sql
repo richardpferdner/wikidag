@@ -6,6 +6,7 @@
 -- AUTO-REPAIRS orphan references caused by representative deduplication
 -- FIXED: MySQL Error 1093 - uses temporary table approach
 -- FIXED: Self-reference circular loops - uses grandparent fallback
+-- DEFAULT: Processes levels 0-10 (stops at level 10)
 
 -- ========================================
 -- TABLE DEFINITIONS
@@ -293,7 +294,7 @@ BEGIN
   JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 12
+    AND c.page_dag_level <= 10
     AND p.page_id IS NULL
     AND c.page_id != sip.representative_page_id;  -- Exclude self-references
   
@@ -313,7 +314,7 @@ BEGIN
   LEFT JOIN sass_page sp_grandparent ON sp_orig.page_parent_id = sp_grandparent.page_id
   LEFT JOIN sass_page_clean gp_clean ON sp_grandparent.page_id = gp_clean.page_id
   WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 12
+    AND c.page_dag_level <= 10
     AND p.page_id IS NULL
     AND c.page_id = sip.representative_page_id;  -- Only self-references
   
@@ -361,7 +362,7 @@ BEGIN
     FROM sass_page_clean c 
     LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
     WHERE c.page_dag_level > 0 
-      AND c.page_dag_level <= 12
+      AND c.page_dag_level <= 10
       AND p.page_id IS NULL
   );
   
@@ -497,7 +498,7 @@ BEGIN
   FROM sass_page_clean c 
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0 
-    AND c.page_dag_level <= 12 
+    AND c.page_dag_level <= 10
     AND p.page_id IS NULL
   
   UNION ALL
@@ -519,7 +520,7 @@ BEGIN
   FROM sass_page_clean c 
   JOIN sass_page_clean p ON c.page_parent_id = p.page_id 
   WHERE c.page_dag_level > 0 
-    AND c.page_dag_level <= 12 
+    AND c.page_dag_level <= 10
     AND p.page_dag_level != c.page_dag_level - 1;
   
 END//
@@ -528,6 +529,7 @@ DELIMITER ;
 
 -- ========================================
 -- SIMPLE CONVERSION PROCEDURE WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
+-- DEFAULT: Processes levels 0-10
 -- ========================================
 
 DROP PROCEDURE IF EXISTS ConvertSASSPageCleanWithIdentitySimple;
@@ -626,6 +628,7 @@ BEGIN
   
   -- ========================================
   -- AUTO-REPAIR ORPHAN PARENT REFERENCES WITH SELF-REFERENCE PROTECTION
+  -- DEFAULT: Processes levels 0-10
   -- ========================================
   
   SELECT 
@@ -639,7 +642,7 @@ BEGIN
   JOIN sass_identity_pages sip ON c.page_parent_id = sip.page_id
   LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
   WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 12
+    AND c.page_dag_level <= 10
     AND p.page_id IS NULL
     AND c.page_id != sip.representative_page_id;  -- Exclude self-references
   
@@ -659,7 +662,7 @@ BEGIN
   LEFT JOIN sass_page sp_grandparent ON sp_orig.page_parent_id = sp_grandparent.page_id
   LEFT JOIN sass_page_clean gp_clean ON sp_grandparent.page_id = gp_clean.page_id
   WHERE c.page_dag_level > 0
-    AND c.page_dag_level <= 12
+    AND c.page_dag_level <= 10
     AND p.page_id IS NULL
     AND c.page_id = sip.representative_page_id;  -- Only self-references
   
@@ -694,7 +697,7 @@ BEGIN
     FROM sass_page_clean c 
     LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
     WHERE c.page_dag_level > 0 
-      AND c.page_dag_level <= 12
+      AND c.page_dag_level <= 10
       AND p.page_id IS NULL
   );
   
@@ -891,11 +894,12 @@ DELIMITER ;
 -- ENHANCED TITLE CLEANING WITH HIERARCHY PRESERVATION AND ORPHAN AUTO-REPAIR
 -- FIXED: MySQL Error 1093 - uses temporary table approach to avoid self-reference
 -- FIXED: Self-reference circular loops - uses grandparent fallback
+-- DEFAULT: Processes levels 0-10 (stops at level 10)
 
 -- Standard conversion with all features:
 CALL ConvertSASSPageCleanWithIdentity(100000);
 
--- Simple conversion (single-pass, faster):
+-- Simple conversion (single-pass, faster, DEFAULT STOPS AT LEVEL 10):
 CALL ConvertSASSPageCleanWithIdentitySimple();
 
 -- Test enhanced title cleaning:
@@ -926,7 +930,7 @@ SELECT
 FROM sass_page_clean c 
 LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
 WHERE c.page_dag_level > 0 
-  AND c.page_dag_level <= 12 
+  AND c.page_dag_level <= 10
   AND p.page_id IS NULL
 
 UNION ALL
@@ -946,12 +950,12 @@ SELECT
 FROM sass_page_clean c 
 JOIN sass_page_clean p ON c.page_parent_id = p.page_id 
 WHERE c.page_dag_level > 0 
-  AND c.page_dag_level <= 12 
+  AND c.page_dag_level <= 10
   AND p.page_dag_level != c.page_dag_level - 1;
 
 -- Expected results:
 -- Level 0 with non-zero parent: 0
--- Missing parent (orphans): ~16,307 (only unresolvable self-refs without grandparents)
+-- Missing parent (orphans): small number (only unresolvable self-refs without grandparents)
 -- Self-references: 0
 -- Wrong parent level: 0 (except for unresolvable self-refs)
 
@@ -965,7 +969,8 @@ KEY FEATURES IN THIS VERSION:
 7. **NEW: Comprehensive tracking of repair types**
 8. **FIXED: MySQL Error 1093 - uses temporary table to avoid self-reference**
 9. **FIXED: Circular self-references prevented**
-10. Comprehensive validation procedures to verify preservation
+10. **DEFAULT: Processes levels 0-10 (not 12) for better performance**
+11. Comprehensive validation procedures to verify preservation
 
 REPRESENTATIVE SELECTION CRITERIA (UPDATED):
 1. FIRST: Original hierarchy pages (page_dag_level <= 2)
@@ -982,13 +987,14 @@ ORPHAN AUTO-REPAIR MECHANISM:
 - Validates repair success (self_references should be 0)
 - Tracks unresolvable orphans (grandparent also orphaned)
 - Provides comprehensive metrics in build_state table
+- DEFAULT: Processes levels 0-10 only
 
 SELF-REFERENCE PROTECTION:
 - Detects when orphan.page_id = representative.page_id
 - Finds grandparent from original sass_page hierarchy
 - Uses grandparent if it exists in sass_page_clean
 - Leaves as orphan if grandparent unavailable (prevents circular reference)
-- Expected: ~24K repaired via grandparent, ~16K unresolvable
+- DEFAULT: Only processes up to level 10
 
 ARCHITECTURAL FIX:
 This version solves both orphan problems:
@@ -999,11 +1005,12 @@ This version solves both orphan problems:
 5. Ensures referential integrity after representative selection
 6. Validates zero self-references after conversion
 7. Works around MySQL self-reference limitations with temp tables
+8. DEFAULT: Stops at level 10 instead of 12 for better performance
 
 MIGRATION FROM PREVIOUS VERSION:
 If you have existing sass_page_clean data with orphans:
 1. Run: CALL ConvertSASSPageCleanWithIdentitySimple();
-2. All standard orphans will be automatically repaired
+2. All standard orphans will be automatically repaired (up to level 10)
 3. Self-reference orphans will use grandparent fallback
 4. Verify: Check that self_references = 0 in output
 
@@ -1012,6 +1019,7 @@ ESTIMATED RUNTIME:
 - Phase 2 (Build identity table): 2-5 minutes
 - Phase 3 (Orphan repair with self-ref protection): 2-4 minutes
 - Total: 9-19 minutes for full conversion with orphan repair
+- Faster with level 10 limit vs level 12
 
 MYSQL COMPATIBILITY:
 - Works with MySQL 5.7+
