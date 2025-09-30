@@ -164,7 +164,7 @@ BEGIN
     
     PRIMARY KEY (page_id, parent_id),
     INDEX idx_level (level)
-  ) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
+  ) ENGINE=InnoDB;
   
   TRUNCATE TABLE sass_work_temp;
   
@@ -370,7 +370,11 @@ DELIMITER ;
 -- ========================================
 
 /*
+-- Drop existing data
+DROP TABLE IF EXISTS sass_identity_pages;DROP TABLE IF EXISTS sass_page_clean;DROP TABLE IF EXISTS sass_page;DROP TABLE IF EXISTS sass_cycles;
+
 -- Standard build with filtering (levels 0-10)
+source build_sass_page.sql;
 CALL BuildSASSPageTreeFiltered(0, 10, 1);
 
 -- Build without filtering
