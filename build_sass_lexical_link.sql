@@ -634,20 +634,10 @@ DELIMITER ;
 -- ========================================
 
 /*
--- CRITICAL UPDATES IN THIS VERSION:
--- 1. FIXED: Title matching now uses original page.page_title (not double-cleaned)
--- 2. FIXED: Allows redirects from ANY Wikipedia page to SASS (not just SASS-to-SASS)
--- 3. IMPROVED: Two-phase matching for accurate page resolution
--- 4. IMPROVED: Source page validation ensures rd_from exists
--- 5. DOCUMENTED: 2-level chain limitation clearly stated
--- 6. ENHANCED: Full redirect path tracking for better diagnostics
-
 -- CRITICAL PREREQUISITES - RUN THESE FIRST:
 
 -- Step 1: Ensure sass_page exists (from build_sass_page.sql)
 -- Step 2: Create sass_page_clean and sass_identity_pages tables:
-source convert_sass_page_clean.sql
-CALL ConvertSASSPageCleanWithIdentitySimple();
 
 -- Step 3: Verify prerequisites exist:
 SELECT COUNT(*) as sass_page_clean_count FROM sass_page_clean;
