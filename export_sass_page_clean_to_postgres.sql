@@ -21,8 +21,6 @@ BEGIN
     DECLARE sample_1pct BIGINT;
     DECLARE min_page_id BIGINT;
     DECLARE max_page_id BIGINT;
-    DECLARE total_articles BIGINT;
-    DECLARE total_categories BIGINT;
     
     -- MySQL version
     SELECT VERSION() as version;
@@ -43,25 +41,13 @@ BEGIN
     FROM sass_identity_pages
     WHERE representative_page_id = page_id;
     
-    SELECT COUNT(*) INTO total_articles
-    FROM sass_identity_pages
-    WHERE representative_page_id = page_id 
-    AND page_namespace_id = 0;
-    
-    SELECT COUNT(*) INTO total_categories
-    FROM sass_identity_pages
-    WHERE representative_page_id = page_id 
-    AND page_namespace_id = 14;
-    
     -- Display statistics
     SELECT 
         'Representative Data Availability Check' as check_type,
         total_representatives as total_representative_rows,
         sample_1pct as sample_1pct,
         min_page_id as min_id,
-        max_page_id as max_id,
-        total_articles as representative_articles,
-        total_categories as representative_categories;
+        max_page_id as max_id;
     
     -- Export recommendations
     SELECT 
