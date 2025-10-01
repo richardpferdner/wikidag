@@ -140,8 +140,10 @@ BEGIN
       ROW_NUMBER() OVER (
         PARTITION BY clean_page_title_enhanced(page_title)
         ORDER BY 
-          CASE WHEN page_dag_level <= 2 THEN 0 ELSE 1 END ASC,  -- Prioritize levels 0-2
-          page_dag_level DESC,                                   -- Then deepest
+          CASE WHEN page_dag_level = 0 THEN 0
+               WHEN page_dag_level <= 2 THEN 1
+               ELSE 2 END ASC,                                   -- Level 0 first, then 1-2, then 3+
+          page_dag_level DESC,                                   -- Then deepest within group
           page_is_leaf ASC,                                      -- Then categories
           page_id ASC                                            -- Then oldest
       ) as rn
