@@ -140,7 +140,7 @@ BEGIN
   ) ranked
   WHERE rn = 1;
   
-  -- Build sass_page_clean with representatives only
+  -- Build sass_page_clean with representatives only (GROUP BY to handle duplicates)
   INSERT INTO sass_page_clean (
     page_id,
     page_title,
@@ -152,12 +152,13 @@ BEGIN
   SELECT 
     tr.representative_page_id,
     tr.page_title,
-    sp.page_parent_id,
-    sp.page_root_id,
-    sp.page_dag_level,
-    sp.page_is_leaf
+    MIN(sp.page_parent_id) as page_parent_id,
+    MIN(sp.page_root_id) as page_root_id,
+    MAX(sp.page_dag_level) as page_dag_level,
+    MIN(sp.page_is_leaf) as page_is_leaf
   FROM temp_representatives tr
-  JOIN sass_page sp ON tr.representative_page_id = sp.page_id;
+  JOIN sass_page sp ON tr.representative_page_id = sp.page_id
+  GROUP BY tr.representative_page_id, tr.page_title;
   
   SET v_total_processed = ROW_COUNT();
   
@@ -544,10 +545,12 @@ DELIMITER ;
 -- ========================================
 
 /*
--- Full build with deduplication and filtering
+-- Load and run complete build
+source convert_sass_page_clean.sql;
 CALL BuildSASSPageCleanComplete();
 
 -- Or run phases separately
+source convert_sass_page_clean.sql;
 CALL ConvertSASSPageClean();
 CALL FilterWeakBranches();
 
@@ -564,7 +567,17 @@ SELECT
   COUNT(CASE WHEN page_is_leaf = 0 THEN 1 END) as categories
 FROM sass_page_clean;
 
+-- Check deduplication effectiveness
+SELECT 
+  'Deduplication Summary' as metric,
+  FORMAT((SELECT COUNT(*) FROM sass_page), 0) as original_rows,
+  FORMAT((SELECT COUNT(DISTINCT page_id) FROM sass_page), 0) as unique_page_ids,
+  FORMAT((SELECT COUNT(*) FROM sass_page_clean), 0) as representatives_created,
+  CONCAT(ROUND(100.0 * (SELECT COUNT(*) FROM sass_page_clean) / 
+    (SELECT COUNT(DISTINCT page_id) FROM sass_page), 1), '%') as retention_rate;
+
 KEY FEATURES:
+- Fixed duplicate key error with GROUP BY in Phase 1
 - No sass_identity_pages table (direct deduplication)
 - Processes levels 0-7 only
 - Weak branch filtering with 9-child threshold
