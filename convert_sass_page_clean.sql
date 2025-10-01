@@ -120,15 +120,21 @@ BEGIN
   VALUES ('build_phase', 1, 'Building sass_page_clean with deduplication')
   ON DUPLICATE KEY UPDATE state_value = 1, state_text = 'Building sass_page_clean with deduplication';
   
-  -- Create temporary table for representative selection
+  -- Create temporary table for representative selection with full row context
   CREATE TEMPORARY TABLE temp_representatives AS
   SELECT 
+    page_id,
     page_title,
-    page_id as representative_page_id
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf
   FROM (
     SELECT 
-      clean_page_title_enhanced(page_title) as page_title,
       page_id,
+      clean_page_title_enhanced(page_title) as page_title,
+      page_parent_id,
+      page_root_id,
       page_dag_level,
       page_is_leaf,
       ROW_NUMBER() OVER (
@@ -143,7 +149,7 @@ BEGIN
   ) ranked
   WHERE rn = 1;
   
-  -- Build sass_page_clean with representatives only (GROUP BY to handle duplicates)
+  -- Build sass_page_clean directly from temp_representatives
   INSERT INTO sass_page_clean (
     page_id,
     page_title,
@@ -153,15 +159,13 @@ BEGIN
     page_is_leaf
   )
   SELECT 
-    tr.representative_page_id,
-    tr.page_title,
-    MIN(sp.page_parent_id) as page_parent_id,
-    MIN(sp.page_root_id) as page_root_id,
-    MAX(sp.page_dag_level) as page_dag_level,
-    MIN(sp.page_is_leaf) as page_is_leaf
-  FROM temp_representatives tr
-  JOIN sass_page sp ON tr.representative_page_id = sp.page_id
-  GROUP BY tr.representative_page_id, tr.page_title;
+    page_id,
+    page_title,
+    page_parent_id,
+    page_root_id,
+    page_dag_level,
+    page_is_leaf
+  FROM temp_representatives;
   
   SET v_total_processed = ROW_COUNT();
   
