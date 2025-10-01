@@ -322,12 +322,12 @@ BEGIN
     WHILE v_current_level >= 3 DO
       
       -- Create temp table of weak categories at this level
-      CREATE TEMPORARY TABLE IF NOT EXISTS temp_weak_categories (
+      DROP TEMPORARY TABLE IF EXISTS temp_weak_categories;
+      
+      CREATE TEMPORARY TABLE temp_weak_categories (
         page_id INT UNSIGNED PRIMARY KEY,
         child_count INT
-      ) ENGINE=MEMORY;
-      
-      TRUNCATE TABLE temp_weak_categories;
+      ) ENGINE=InnoDB;
       
       -- Find categories with <9 children
       INSERT INTO temp_weak_categories (page_id, child_count)
@@ -387,15 +387,20 @@ BEGIN
   END WHILE;
   
   -- Delete orphaned leaves (pages whose entire ancestor chain was filtered)
+  CREATE TEMPORARY TABLE temp_orphaned_leaves AS
+  SELECT c.page_id
+  FROM sass_page_clean c
+  LEFT JOIN sass_page_clean p ON c.page_parent_id = p.page_id
+  WHERE c.page_is_leaf = 1
+    AND c.page_dag_level > 0
+    AND p.page_id IS NULL;
+  
   DELETE FROM sass_page_clean
-  WHERE page_is_leaf = 1
-    AND page_dag_level > 0
-    AND NOT EXISTS (
-      SELECT 1 FROM sass_page_clean p 
-      WHERE p.page_id = sass_page_clean.page_parent_id
-    );
+  WHERE page_id IN (SELECT page_id FROM temp_orphaned_leaves);
   
   SET @deleted_orphans = ROW_COUNT();
+  
+  DROP TEMPORARY TABLE temp_orphaned_leaves;
   
   -- Update build state
   INSERT INTO clean_build_state (state_key, state_value, state_text) 
