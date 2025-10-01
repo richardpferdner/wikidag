@@ -106,8 +106,11 @@ BEGIN
   
   SET v_start_time = UNIX_TIMESTAMP();
   
-  -- Clear target table
+  -- Clear target table and any leftover temp tables
   TRUNCATE TABLE sass_page_clean;
+  DROP TEMPORARY TABLE IF EXISTS temp_representatives;
+  DROP TEMPORARY TABLE IF EXISTS temp_orphan_mappings;
+  DROP TEMPORARY TABLE IF EXISTS temp_self_ref_orphans;
   
   -- ========================================
   -- PHASE 1: BUILD sass_page_clean WITH DEDUPLICATION
