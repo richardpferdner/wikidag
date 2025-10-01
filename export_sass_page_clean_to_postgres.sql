@@ -198,7 +198,7 @@ BEGIN
     
     SET range_start = min_id;
     
-    WHILE range_start <= max_id DO
+    export_loop: WHILE range_start <= max_id DO
         SET range_end = range_start + (chunk_size * 10);  -- Use larger range windows
         
         SET chunk_file = CONCAT(
@@ -254,9 +254,9 @@ BEGIN
         SET range_start = range_end;
         
         IF chunk_rows = 0 THEN
-            LEAVE;
+            LEAVE export_loop;
         END IF;
-    END WHILE;
+    END WHILE export_loop;
     
     SELECT 
         'Chunked Export Complete' as final_status,
@@ -349,7 +349,7 @@ BEGIN
     SELECT 
         'Memory Table Created' as status,
         FORMAT(COUNT(*), 0) as rows_in_table,
-        'Query: SELECT * FROM sass_page_clean_export' as usage
+        'Query: SELECT * FROM sass_page_clean_export' as usage_note
     FROM sass_page_clean_export;
 END$$
 
